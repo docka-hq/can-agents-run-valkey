@@ -1,0 +1,48 @@
+{
+ "bases": {
+  "valkey/valkey-bundle:9.1.3-trixie": "valkey/valkey-bundle@sha256:dd30c59c2b2a598e83308095220a31d6d93d64c40a839c702cb1e98c8e220660",
+  "valkey/valkey:9.1.2-trixie": "valkey/valkey@sha256:418652cfb58ef879d4978c33553735d7147016032d5aefaa14c828e611eb9dfd",
+  "redis:8.10.2-trixie": "redis@sha256:6f81e8915c60b065a524e6967e0ad1c639ba6efa84d669f823683ea04d9150ee",
+  "redis:7.2.16": "redis@sha256:0637954999d01b7c9ce9167db2da50656e2590d3b884f1c600c5f63bb6e6773c"
+ },
+ "images": {
+  "cari-kv-app:valkey-9.1": {
+   "id": "sha256:d2894405798cca2a075ef5d92e264d9ebfc658045c7cdb8ca97d20263d38b51c",
+   "server": "Valkey server v=9.1.2 sha=00000000:0 malloc=jemalloc-5.3.0 bits=64 build=16129465b18d72a",
+   "old_server": null,
+   "pip": {
+    "numpy": "2.5.3",
+    "redis": "8.1.0",
+    "valkey": "6.1.1"
+   }
+  },
+  "cari-kv-app:redis-8.10": {
+   "id": "sha256:895bb7230c3549e3461befc0bb9bf22812d8fac44581392cd1f5e444dbaf29d2",
+   "server": "Redis server v=8.10.2 sha=00000000:1 malloc=jemalloc-5.3.0 bits=64 build=fbc5ac9ab55dc180",
+   "old_server": null,
+   "pip": {
+    "numpy": "2.5.3",
+    "redis": "8.1.0",
+    "valkey": "6.1.1"
+   }
+  },
+  "cari-kv-mig:valkey-9.1": {
+   "id": "sha256:f5998c7b033bf9492a1902d3e3097aaf6ddb27f4e40d9a4c9b9341ef1a950d2d",
+   "server": "Valkey server v=9.1.2 sha=00000000:0 malloc=jemalloc-5.3.0 bits=64 build=16129465b18d72a",
+   "old_server": "Redis server v=7.2.16 sha=00000000:0 malloc=jemalloc-5.3.0 bits=64 build=67aeaf73960a578a",
+   "pip": {
+    "redis": "8.1.0",
+    "valkey": "6.1.1"
+   }
+  },
+  "cari-kv-mig:redis-8.10": {
+   "id": "sha256:d5579d71c210542654e674a9f24a4ac7039703e7fd3eddba265f3abe536f4965",
+   "server": "Redis server v=8.10.2 sha=00000000:1 malloc=jemalloc-5.3.0 bits=64 build=fbc5ac9ab55dc180",
+   "old_server": "Redis server v=7.2.16 sha=00000000:0 malloc=jemalloc-5.3.0 bits=64 build=67aeaf73960a578a",
+   "pip": {
+    "redis": "8.1.0",
+    "valkey": "6.1.1"
+   }
+  }
+ }
+}

@@ -1,0 +1,24 @@
+# CARI Issue 2, wave-2 - migration off Redis 8. Current server: Redis 8.10.2 (binaries from the official
+# image, no modules loaded); new server: the official Valkey 9.1.2 image.
+FROM redis:8.10.2-trixie AS old
+FROM valkey/valkey:9.1.2-trixie
+USER root
+ENV DEBIAN_FRONTEND=noninteractive PIP_BREAK_SYSTEM_PACKAGES=1 PIP_DISABLE_PIP_VERSION_CHECK=1 KV_PRODUCT=valkey
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-pip python3-venv ca-certificates curl jq procps less vim-tiny iproute2 net-tools \
+      libsystemd0 libcap2 zlib1g libzstd1 libssl3t64 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /bin/bash /bin/sh
+RUN pip3 install --no-cache-dir redis valkey && pip3 list --format=json > /opt/pip-system.json
+RUN python3 -m venv /opt/kv-grader && /opt/kv-grader/bin/pip install --no-cache-dir redis \
+    && /opt/kv-grader/bin/pip list --format=json > /opt/pip-grader.json
+COPY --from=old /usr/local/bin/redis-server /opt/redis-8.10/bin/redis-server
+COPY --from=old /usr/local/bin/redis-cli /opt/redis-8.10/bin/redis-cli
+RUN /opt/redis-8.10/bin/redis-server --version
+COPY assets/mig8/old.conf /etc/redis-old/redis.conf
+COPY assets/mig8/valkey.conf /etc/valkey/valkey.conf
+COPY assets/mig8/seed_old8.py assets/mig8/kvdump2.py /opt/kv-seed/
+COPY assets/kv-start-mig8.sh /usr/local/sbin/kv-start
+WORKDIR /root
+ENTRYPOINT []
+CMD ["/usr/local/sbin/kv-start"]

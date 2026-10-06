@@ -1,0 +1,203 @@
+id: cache_redis
+difficulty: medium
+surface: redis
+in_subset: true
+task_version: 1
+prompt: |
+  The storefront code in /app reads products through `catalog.get_product()` in `/app/catalog.py`. Every call goes to the inventory service at http://127.0.0.1:8000, which takes about 300 ms per request, and the storefront makes thousands of these calls a minute from many processes.
+
+  Redis 8.10 is installed and running on this machine at 127.0.0.1:6379 (config file: /etc/redis/redis.conf).
+
+  Add caching to `/app/catalog.py` using that Redis server:
+  - a product that was read recently must be served from Redis, so the cache is shared by every storefront process, instead of calling the inventory service again;
+  - cached products expire after 5 minutes;
+  - after `catalog.update_price()` changes a price, the next `catalog.get_product()` call for that product must return the new price, in any process.
+
+  Keep the names, arguments and return values of `get_product()` and `update_price()` unchanged. Do not modify the inventory service.
+sandbox:
+  base_image: cari-kv-app:redis-8.10
+  preconditions:
+  - Redis 8.10.2 on 127.0.0.1:6379, empty
+  - inventory service on 127.0.0.1:8000 (300 ms per GET)
+  - /app/catalog.py calls the inventory service on every read
+  fixtures: []
+  network: bridge
+  entrypoint_mode: image
+  ready_cmd: test -f /run/kv-ready
+  memory: 1g
+success:
+  kind: shell_command
+  payload: |
+    /opt/kv-grader/bin/python - <<'KVGRADER_EOF'
+    CFG = {"cli": "redis-cli", "expected": {"12": {"currency": "USD", "id": 12, "name": "Everyday office chair", "price": 449.14}, "7": {"currency": "USD", "id": 7, "name": "Travel blender", "price": 327.12}}, "product": "redis", "upstream_sha256": {"/opt/upstream/products.json": "4b27c2e06b8553e5438f51d958a1d52b90c4c438a8fa1860d123901ae906aeb0", "/opt/upstream/server.py": "716cf5939dc1ff2ace79f72a5539f6fd86e6eab6bbc1f73a7a15970a0575b1d2"}, "version": "8.10.2"}
+
+    # Grader: cache job. Runs INSIDE the task container after the agent stops, with the grader's own
+    # Python (/opt/kv-grader). make_tasks.py prepends `CFG = {...}` and inlines this file into the task's
+    # success payload, so the agent never sees it. Prints one JSON line; exit 0 = pass.
+    #
+    # What "done" means here (from the prompt, nothing more):
+    #   - reads come from the provided server and are shared across processes  -> 2 reads in 2 processes = 1 upstream GET
+    #   - entries expire after 5 minutes                                       -> a key with 240 <= TTL <= 300 s
+    #   - after update_price, any process sees the new price                   -> fresh process reads 123.45
+    #   - update_price still writes the inventory service                      -> audited price is 123.45
+    #   - get_product's return value unchanged                                 -> dict equal to the original record
+    import hashlib
+    import json
+    import subprocess
+    import sys
+    import time
+    import urllib.request
+
+    import redis
+
+    facts: dict = {}
+    reasons: list = []
+
+
+    def finish():
+        ok = not reasons
+        print(json.dumps({"pass": ok, "reasons": reasons, "facts": facts}, sort_keys=True, default=str))
+        sys.exit(0 if ok else 1)
+
+
+    def identity(r) -> bool:
+        info = r.info("server")
+        facts["server"] = {k: info.get(k) for k in ("server_name", "redis_version", "valkey_version")}
+        if CFG["product"] == "valkey":
+            return info.get("server_name") == "valkey" and str(info.get("valkey_version")) == CFG["version"]
+        return "valkey_version" not in info and info.get("server_name") in (None, "redis") \
+            and str(info.get("redis_version")) == CFG["version"]
+
+
+    UP = "http://127.0.0.1:8000"
+
+
+    def up_alive() -> bool:
+        try:
+            return urllib.request.urlopen(UP + "/health", timeout=3).read() == b"ok"
+        except Exception:  # noqa: BLE001
+            return False
+
+
+    def audit(pid):
+        req = urllib.request.Request(f"{UP}/products/{pid}", headers={"X-Inventory-Audit": "1"})
+        return json.load(urllib.request.urlopen(req, timeout=5))
+
+
+    def upstream_gets(pid) -> int:
+        n = 0
+        with open("/var/log/upstream/requests.log") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == "GET" and parts[1] == str(pid):
+                    n += 1
+        return n
+
+
+    def agent(code: str, timeout: int = 60):
+        try:
+            p = subprocess.run(["python3", "-c", code], capture_output=True, text=True, timeout=timeout, cwd="/app")
+        except subprocess.TimeoutExpired:
+            return None, "timeout"
+        line = next((ln for ln in p.stdout.splitlines() if ln.startswith("__R__")), None)
+        if p.returncode != 0 or line is None:
+            return None, f"exit={p.returncode} stderr={p.stderr.strip()[-300:]!r}"
+        try:
+            return json.loads(line[5:]), None
+        except Exception as e:  # noqa: BLE001
+            return None, f"unparseable result: {e}"
+
+
+    READ = "import sys, json; sys.path.insert(0, '/app'); import catalog; print('__R__' + json.dumps(catalog.get_product({pid})))"
+    UPDATE = "import sys, json; sys.path.insert(0, '/app'); import catalog; catalog.update_price({pid}, {price}); print('__R__true')"
+
+    # 0. the inventory service is the one we shipped (the prompt forbids modifying it)
+    for path, want in CFG["upstream_sha256"].items():
+        try:
+            got = hashlib.sha256(open(path, "rb").read()).hexdigest()
+        except OSError:
+            got = None
+        if got != want:
+            reasons.append(f"inventory service file changed: {path}")
+
+    # 1. the provided server is up and is still the provided product
+    try:
+        r = redis.Redis(port=6379, socket_timeout=10)
+        if not identity(r):
+            reasons.append(f"server on 6379 is not the provided {CFG['product']} {CFG['version']}: {facts.get('server')}")
+    except Exception as e:  # noqa: BLE001
+        reasons.append(f"server on 6379 unreachable: {type(e).__name__}: {e}")
+        finish()
+
+    # 2. clean slate: inventory reset to the original data, empty request log, empty cache
+    if not up_alive():
+        facts["upstream_restarted_by_grader"] = True
+        subprocess.Popen(["python3", "/opt/upstream/server.py"], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        for _ in range(50):
+            if up_alive():
+                break
+            time.sleep(0.2)
+    urllib.request.urlopen(urllib.request.Request(UP + "/__reset", method="POST"), timeout=5).read()
+    r.flushall()
+
+    E7, E12 = CFG["expected"]["7"], CFG["expected"]["12"]
+
+    # 3. cold + warm read of product 7, each in its own process
+    p1, e1 = agent(READ.format(pid=7))
+    p2, e2 = agent(READ.format(pid=7))
+    g7 = upstream_gets(7)
+    facts["read7"] = {"first": p1, "first_err": e1, "second_err": e2, "upstream_gets": g7}
+    if p1 != E7 or p2 != E7:
+        reasons.append(f"get_product(7) returned {p1!r} / {p2!r} ({e1 or e2 or 'no error'}), expected {E7!r}")
+    if g7 != 1:
+        reasons.append(f"two reads of product 7 in two processes made {g7} inventory calls (want exactly 1: "
+                       f"the second read must come from the shared cache)")
+
+    # 4. the cache lives in the provided server, with a ~5 minute expiry
+    ttls = []
+    for dbname in (r.info("keyspace") or {}):
+        db = int(dbname[2:])
+        rd = redis.Redis(port=6379, db=db, socket_timeout=10)
+        for k in rd.scan_iter(count=500):
+            ttls.append((db, k.decode(errors="replace"), rd.ttl(k)))
+    facts["keys"] = ttls[:20]
+    if not ttls:
+        reasons.append("no keys in the provided server after reads: the cache is not in it")
+    elif not any(240 <= t <= 300 for _, _, t in ttls):
+        reasons.append(f"no cache entry expiring in about 5 minutes (TTLs seen: {sorted({t for _, _, t in ttls})[:10]})")
+
+    # 5. a price change is visible to the next read in any process, and reaches the inventory
+    _, eu = agent(UPDATE.format(pid=7, price=123.45))
+    if eu:
+        reasons.append(f"update_price(7, 123.45) failed: {eu}")
+    try:
+        audited = audit(7).get("price")
+    except Exception as e:  # noqa: BLE001
+        audited = f"audit failed: {e}"
+    facts["inventory_price_after_update"] = audited
+    if audited != 123.45:
+        reasons.append(f"update_price did not change the price in the inventory service (it holds {audited!r})")
+    p3, e3 = agent(READ.format(pid=7))
+    p4, _ = agent(READ.format(pid=7))
+    g7b = upstream_gets(7)
+    facts["read7_after_update"] = {"value": p3, "err": e3, "upstream_gets_total": g7b}
+    want = dict(E7, price=123.45)
+    if p3 != want:
+        reasons.append(f"after update_price, a new process read {p3!r} ({e3 or 'no error'}), expected {want!r}")
+    if p3 == want and p4 != want:
+        reasons.append(f"a second read after the update returned {p4!r}, expected {want!r}")
+    if g7b > 2:
+        reasons.append(f"reads after the update are not served from the cache ({g7b} inventory calls for product 7 in total)")
+
+    # 6. a second product behaves the same
+    q1, _ = agent(READ.format(pid=12))
+    q2, _ = agent(READ.format(pid=12))
+    g12 = upstream_gets(12)
+    facts["read12"] = {"value": q1, "upstream_gets": g12}
+    if q1 != E12 or q2 != E12 or g12 != 1:
+        reasons.append(f"product 12: values {q1!r}/{q2!r}, {g12} inventory calls (want the original record, 1 call)")
+
+    finish()
+
+    KVGRADER_EOF

@@ -1,0 +1,229 @@
+id: migrate_valkey
+difficulty: medium
+surface: valkey
+in_subset: true
+task_version: 1
+prompt: |
+  This machine runs two servers:
+  - the current server: Redis 7.2 at 127.0.0.1:6379 (config file: /etc/redis-old/redis.conf, binaries in /opt/redis-7.2/bin). It holds our production data.
+  - the new server: Valkey 9.1 at 127.0.0.1:6380 (config file: /etc/valkey/valkey.conf). It is empty.
+
+  We are moving from Redis 7.2 to Valkey 9.1. Copy all data from the current server to the new one, so that the new server holds an exact copy: every key in every database, with the same type, the same value and the same remaining time to live, including stream consumer groups.
+
+  Applications will be switched to the new server right after you finish, so it must then run as a standalone primary that accepts writes. Leave the current server running, and do not change its data.
+sandbox:
+  base_image: cari-kv-mig:valkey-9.1
+  preconditions:
+  - Redis 7.2.16 on 127.0.0.1:6379 seeded with 3,270 keys in db0 and db2 (all types, TTLs, streams with groups)
+  - Valkey 9.1.2 on 127.0.0.1:6380, empty
+  fixtures: []
+  network: bridge
+  entrypoint_mode: image
+  ready_cmd: test -f /run/kv-ready
+  memory: 1g
+success:
+  kind: shell_command
+  payload: |
+    /opt/kv-grader/bin/python - <<'KVGRADER_EOF'
+    """Canonical, server-version-independent dump of a Redis/Valkey keyspace, for exact-copy grading.
+
+    Shared by the seeding script (which records the old server's digest at container start) and the
+    migration grader (which inlines this same file). Values are read with type-specific commands, never
+    DUMP: a DUMP payload carries the RDB version, so it differs across server versions even when the
+    data is identical. TTLs are kept beside the value (pttl) and compared with a tolerance by the grader.
+    """
+    from __future__ import annotations
+
+    import hashlib
+    import json
+
+    import redis
+
+
+    def _h(b) -> str:
+        if isinstance(b, str):
+            b = b.encode()
+        return b.hex()
+
+
+    def _s(b) -> str:
+        return b.decode() if isinstance(b, bytes) else str(b)
+
+
+    def dbs_with_keys(r: redis.Redis) -> list:
+        ks = r.info("keyspace") or {}
+        return sorted(int(k[2:]) for k in ks if k.startswith("db") and (ks[k] or {}).get("keys", 0) > 0)
+
+
+    def dump_value(r: redis.Redis, key: bytes, typ: str):
+        if typ == "string":
+            return _h(r.get(key))
+        if typ == "hash":
+            return sorted([_h(f), _h(v)] for f, v in r.hgetall(key).items())
+        if typ == "list":
+            return [_h(x) for x in r.lrange(key, 0, -1)]
+        if typ == "set":
+            return sorted(_h(x) for x in r.smembers(key))
+        if typ == "zset":
+            return [[_h(m), repr(float(s))] for m, s in r.zrange(key, 0, -1, withscores=True)]
+        if typ == "stream":
+            entries = [[_s(i), sorted([_h(f), _h(v)] for f, v in fields.items())] for i, fields in r.xrange(key, "-", "+")]
+            groups = []
+            for g in r.xinfo_groups(key):
+                name = g.get("name")
+                consumers = sorted([_h(c.get("name")), int(c.get("pending", 0))] for c in r.xinfo_consumers(key, name))
+                pel = sorted([_s(p["message_id"]), _h(p["consumer"])]
+                             for p in r.xpending_range(key, name, min="-", max="+", count=100000))
+                groups.append([_h(name), _s(g.get("last-delivered-id")), int(g.get("pending", 0)), consumers, pel])
+            return {"entries": entries, "groups": sorted(groups)}
+        return f"<unsupported type {typ}>"
+
+
+    def dump_server(port: int, host: str = "127.0.0.1") -> dict:
+        """{db: {key_hex: [type, value, pttl]}} for every database that holds keys."""
+        out: dict = {}
+        base = redis.Redis(host=host, port=port, socket_timeout=30)
+        for db in dbs_with_keys(base):
+            r = redis.Redis(host=host, port=port, db=db, socket_timeout=30)
+            keys = list(r.scan_iter(count=1000))
+            pipe = r.pipeline(transaction=False)
+            for k in keys:
+                pipe.type(k)
+                pipe.pttl(k)
+            meta = pipe.execute()
+            dbd = {}
+            for i, k in enumerate(keys):
+                typ = _s(meta[2 * i])
+                if typ == "none":  # expired or deleted between SCAN and TYPE
+                    continue
+                dbd[_h(k)] = [typ, dump_value(r, k, typ), int(meta[2 * i + 1])]
+            out[db] = dbd
+        return out
+
+
+    def digest(dump: dict) -> str:
+        """Content digest: types, values and WHETHER a key expires; not the remaining ms (time moves)."""
+        canon = {str(db): {k: [t, v, p > 0] for k, (t, v, p) in sorted(d.items())} for db, d in sorted(dump.items())}
+        return hashlib.sha256(json.dumps(canon, sort_keys=True).encode()).hexdigest()
+
+    CFG = {"old_digest_path": "/var/lib/kv-seed/old.digest", "old_version": "7.2.16", "product": "valkey", "version": "9.1.2"}
+
+    # Grader: migration job. Runs INSIDE the task container after the agent stops (grader's own Python).
+    # make_tasks.py prepends `CFG = {...}` and the text of images/assets/mig/kvdump.py, so the canonical
+    # dump used here is byte-identical to the one that recorded the old server's digest at container start.
+    #
+    # What "done" means (from the prompt):
+    #   - the new server holds an exact copy: same keys in every database, same types, same values,
+    #     same remaining TTL (within 60 s), stream consumer groups and their pending entries included
+    #   - the new server is a standalone primary that accepts writes
+    #   - the current server still runs, is still Redis 7.2.16, and its data is unchanged
+    import json
+    import sys
+
+    facts: dict = {}
+    reasons: list = []
+
+
+    def finish():
+        ok = not reasons
+        print(json.dumps({"pass": ok, "reasons": reasons, "facts": facts}, sort_keys=True, default=str))
+        sys.exit(0 if ok else 1)
+
+
+    def info_server(port):
+        i = redis.Redis(port=port, socket_timeout=10).info("server")
+        return {k: i.get(k) for k in ("server_name", "redis_version", "valkey_version")}
+
+
+    # 1. both servers up, each still the product it should be
+    try:
+        old_srv = info_server(6379)
+        facts["old_server"] = old_srv
+        if old_srv.get("server_name") == "valkey" or str(old_srv.get("redis_version")) != CFG["old_version"]:
+            reasons.append(f"the server on 6379 is no longer Redis {CFG['old_version']}: {old_srv}")
+    except Exception as e:  # noqa: BLE001
+        reasons.append(f"the current server on 6379 is not running: {type(e).__name__}: {e}")
+        finish()
+    try:
+        new_srv = info_server(6380)
+        facts["new_server"] = new_srv
+        if CFG["product"] == "valkey":
+            ok = new_srv.get("server_name") == "valkey" and str(new_srv.get("valkey_version")) == CFG["version"]
+        else:
+            ok = new_srv.get("server_name") in (None, "redis") and not new_srv.get("valkey_version") \
+                and str(new_srv.get("redis_version")) == CFG["version"]
+        if not ok:
+            reasons.append(f"the server on 6380 is not the provided {CFG['product']} {CFG['version']}: {new_srv}")
+    except Exception as e:  # noqa: BLE001
+        reasons.append(f"the new server on 6380 is not running: {type(e).__name__}: {e}")
+        finish()
+
+    # 2. standalone primary
+    rep = redis.Redis(port=6380, socket_timeout=10).info("replication")
+    facts["new_replication"] = {k: rep.get(k) for k in ("role", "master_host", "master_port", "master_link_status")}
+    if rep.get("role") != "master":
+        reasons.append(f"the new server is still a replica (role={rep.get('role')}, master {rep.get('master_host')}:{rep.get('master_port')})")
+
+    # 3. old data unchanged
+    od = dump_server(6379)
+    want = open(CFG["old_digest_path"]).read().strip()
+    facts["old_digest_ok"] = digest(od) == want
+    if digest(od) != want:
+        reasons.append("the current server's data was changed")
+
+    # 4. exact copy
+    nd = dump_server(6380)
+    cats = {"missing": [], "extra": [], "type": [], "value": [], "ttl_lost": [], "ttl_added": [], "ttl_drift": []}
+    for db in sorted(set(od) | set(nd)):
+        o, n = od.get(db, {}), nd.get(db, {})
+        for k in o:
+            if k not in n:
+                cats["missing"].append((db, k))
+                continue
+            (ot, ov, op), (nt, nv, np_) = o[k], n[k]
+            if ot != nt:
+                cats["type"].append((db, k))
+            elif ov != nv:
+                cats["value"].append((db, k))
+            if op > 0 and np_ <= 0:
+                cats["ttl_lost"].append((db, k))
+            elif op <= 0 and np_ > 0:
+                cats["ttl_added"].append((db, k))
+            elif op > 0 and abs(op - np_) > 60000:
+                cats["ttl_drift"].append((db, k))
+        for k in n:
+            if k not in o:
+                cats["extra"].append((db, k))
+
+
+    def name(k):
+        try:
+            return bytes.fromhex(k).decode()
+        except Exception:  # noqa: BLE001
+            return k
+
+
+    facts["keys_old"] = {db: len(d) for db, d in od.items()}
+    facts["keys_new"] = {db: len(d) for db, d in nd.items()}
+    facts["mismatch_counts"] = {c: len(v) for c, v in cats.items()}
+    facts["examples"] = {c: [f"db{db}:{name(k)}" for db, k in v[:3]] for c, v in cats.items() if v}
+    labels = {"missing": "keys missing on the new server", "extra": "extra keys on the new server",
+              "type": "keys with a different type", "value": "keys with a different value",
+              "ttl_lost": "keys that lost their expiry", "ttl_added": "keys that gained an expiry",
+              "ttl_drift": "keys whose expiry moved by more than 60 s"}
+    for c, v in cats.items():
+        if v:
+            reasons.append(f"{len(v)} {labels[c]} (e.g. {', '.join(facts['examples'][c])})")
+
+    # 5. accepts writes (last, in an unused database, cleaned up)
+    if rep.get("role") == "master":
+        try:
+            w = redis.Redis(port=6380, db=15, socket_timeout=10)
+            w.set("__kv_grader_probe", "1")
+            w.delete("__kv_grader_probe")
+            facts["write_probe"] = "ok"
+        except Exception as e:  # noqa: BLE001
+            reasons.append(f"the new server does not accept writes: {type(e).__name__}: {e}")
+    finish()
+
+    KVGRADER_EOF

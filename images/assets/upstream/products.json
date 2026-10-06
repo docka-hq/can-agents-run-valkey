@@ -1,0 +1,302 @@
+[
+ {
+  "id": 1,
+  "name": "Pro kettle",
+  "price": 84.69,
+  "currency": "USD"
+ },
+ {
+  "id": 2,
+  "name": "Everyday office chair",
+  "price": 75.05,
+  "currency": "USD"
+ },
+ {
+  "id": 3,
+  "name": "Compact headphones",
+  "price": 457.94,
+  "currency": "USD"
+ },
+ {
+  "id": 4,
+  "name": "Smart desk lamp",
+  "price": 188.38,
+  "currency": "USD"
+ },
+ {
+  "id": 5,
+  "name": "Heavy-duty notebook",
+  "price": 351.68,
+  "currency": "USD"
+ },
+ {
+  "id": 6,
+  "name": "Deluxe water bottle",
+  "price": 455.75,
+  "currency": "USD"
+ },
+ {
+  "id": 7,
+  "name": "Travel blender",
+  "price": 327.12,
+  "currency": "USD"
+ },
+ {
+  "id": 8,
+  "name": "Mini monitor stand",
+  "price": 251.74,
+  "currency": "USD"
+ },
+ {
+  "id": 9,
+  "name": "Eco speaker",
+  "price": 139.67,
+  "currency": "USD"
+ },
+ {
+  "id": 10,
+  "name": "Classic backpack",
+  "price": 306.38,
+  "currency": "USD"
+ },
+ {
+  "id": 11,
+  "name": "Pro kettle",
+  "price": 432.66,
+  "currency": "USD"
+ },
+ {
+  "id": 12,
+  "name": "Everyday office chair",
+  "price": 449.14,
+  "currency": "USD"
+ },
+ {
+  "id": 13,
+  "name": "Compact headphones",
+  "price": 382.7,
+  "currency": "USD"
+ },
+ {
+  "id": 14,
+  "name": "Smart desk lamp",
+  "price": 11.71,
+  "currency": "USD"
+ },
+ {
+  "id": 15,
+  "name": "Heavy-duty notebook",
+  "price": 439.5,
+  "currency": "USD"
+ },
+ {
+  "id": 16,
+  "name": "Deluxe water bottle",
+  "price": 227.71,
+  "currency": "USD"
+ },
+ {
+  "id": 17,
+  "name": "Travel blender",
+  "price": 108.01,
+  "currency": "USD"
+ },
+ {
+  "id": 18,
+  "name": "Mini monitor stand",
+  "price": 192.34,
+  "currency": "USD"
+ },
+ {
+  "id": 19,
+  "name": "Eco speaker",
+  "price": 46.24,
+  "currency": "USD"
+ },
+ {
+  "id": 20,
+  "name": "Classic backpack",
+  "price": 318.95,
+  "currency": "USD"
+ },
+ {
+  "id": 21,
+  "name": "Pro kettle",
+  "price": 12.94,
+  "currency": "USD"
+ },
+ {
+  "id": 22,
+  "name": "Everyday office chair",
+  "price": 111.02,
+  "currency": "USD"
+ },
+ {
+  "id": 23,
+  "name": "Compact headphones",
+  "price": 59.19,
+  "currency": "USD"
+ },
+ {
+  "id": 24,
+  "name": "Smart desk lamp",
+  "price": 446.39,
+  "currency": "USD"
+ },
+ {
+  "id": 25,
+  "name": "Heavy-duty notebook",
+  "price": 68.5,
+  "currency": "USD"
+ },
+ {
+  "id": 26,
+  "name": "Deluxe water bottle",
+  "price": 42.26,
+  "currency": "USD"
+ },
+ {
+  "id": 27,
+  "name": "Travel blender",
+  "price": 349.37,
+  "currency": "USD"
+ },
+ {
+  "id": 28,
+  "name": "Mini monitor stand",
+  "price": 461.01,
+  "currency": "USD"
+ },
+ {
+  "id": 29,
+  "name": "Eco speaker",
+  "price": 75.95,
+  "currency": "USD"
+ },
+ {
+  "id": 30,
+  "name": "Classic backpack",
+  "price": 229.78,
+  "currency": "USD"
+ },
+ {
+  "id": 31,
+  "name": "Pro kettle",
+  "price": 133.94,
+  "currency": "USD"
+ },
+ {
+  "id": 32,
+  "name": "Everyday office chair",
+  "price": 166.39,
+  "currency": "USD"
+ },
+ {
+  "id": 33,
+  "name": "Compact headphones",
+  "price": 298.25,
+  "currency": "USD"
+ },
+ {
+  "id": 34,
+  "name": "Smart desk lamp",
+  "price": 123.46,
+  "currency": "USD"
+ },
+ {
+  "id": 35,
+  "name": "Heavy-duty notebook",
+  "price": 408.94,
+  "currency": "USD"
+ },
+ {
+  "id": 36,
+  "name": "Deluxe water bottle",
+  "price": 198.83,
+  "currency": "USD"
+ },
+ {
+  "id": 37,
+  "name": "Travel blender",
+  "price": 97.75,
+  "currency": "USD"
+ },
+ {
+  "id": 38,
+  "name": "Mini monitor stand",
+  "price": 436.26,
+  "currency": "USD"
+ },
+ {
+  "id": 39,
+  "name": "Eco speaker",
+  "price": 101.59,
+  "currency": "USD"
+ },
+ {
+  "id": 40,
+  "name": "Classic backpack",
+  "price": 404.6,
+  "currency": "USD"
+ },
+ {
+  "id": 41,
+  "name": "Pro kettle",
+  "price": 485.2,
+  "currency": "USD"
+ },
+ {
+  "id": 42,
+  "name": "Everyday office chair",
+  "price": 117.38,
+  "currency": "USD"
+ },
+ {
+  "id": 43,
+  "name": "Compact headphones",
+  "price": 177.5,
+  "currency": "USD"
+ },
+ {
+  "id": 44,
+  "name": "Smart desk lamp",
+  "price": 9.17,
+  "currency": "USD"
+ },
+ {
+  "id": 45,
+  "name": "Heavy-duty notebook",
+  "price": 130.94,
+  "currency": "USD"
+ },
+ {
+  "id": 46,
+  "name": "Deluxe water bottle",
+  "price": 445.91,
+  "currency": "USD"
+ },
+ {
+  "id": 47,
+  "name": "Travel blender",
+  "price": 357.48,
+  "currency": "USD"
+ },
+ {
+  "id": 48,
+  "name": "Mini monitor stand",
+  "price": 28.19,
+  "currency": "USD"
+ },
+ {
+  "id": 49,
+  "name": "Eco speaker",
+  "price": 288.9,
+  "currency": "USD"
+ },
+ {
+  "id": 50,
+  "name": "Classic backpack",
+  "price": 273.34,
+  "currency": "USD"
+ }
+]
