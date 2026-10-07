@@ -4,8 +4,9 @@
 #
 # What "done" means here (from the prompt, nothing more):
 #   - reads come from the provided server and are shared across processes  -> 2 reads in 2 processes = 1 upstream GET
-#   - entries expire after 5 minutes                                       -> every key holding product 7 has 240 <= TTL <= 300 s
-#     (v2, 2026-10-06: v1 accepted any key with such a TTL; keys are found by content, not by name)
+#   - entries expire after 5 minutes                                       -> every key holding product 7 has 240 <= TTL <= 300 s,
+#     before and after update_price (v2, 2026-10-06: v1 accepted any key with such a TTL; keys are found by content,
+#     not by name; 2026-10-07: also checked after the update)
 #   - after update_price, any process sees the new price                   -> fresh process reads 123.45
 #   - update_price still writes the inventory service                      -> audited price is 123.45
 #   - get_product's return value unchanged                                 -> dict equal to the original record
@@ -168,25 +169,31 @@ def value_text(rd, k) -> str:
     return ""
 
 
-ttls, entries = [], []
-for dbname in (r.info("keyspace") or {}):
-    db = int(dbname[2:])
-    rd = redis.Redis(port=6379, db=db, socket_timeout=10)
-    for k in rd.scan_iter(count=500):
-        t = rd.ttl(k)
-        name = k.decode(errors="replace")
-        ttls.append((db, name, t))
-        if rd.type(k) == b"hash":
-            # a product may sit in one field of a shared hash with its own field expiry (HEXPIRE / HSETEX),
-            # or be the whole hash; the expiry that applies is the earlier of the key's and the field's
-            for f, v in rd.hgetall(k).items():
-                if E7["name"] in decode_any(v) or E7["name"] in decode_any(f):
-                    ft = int(rd.execute_command("HTTL", k, "FIELDS", 1, f)[0])
-                    # the field disappears at whichever deadline comes first, the key's or its own
-                    set_ttls = [x for x in (t, ft) if x >= 0]
-                    entries.append((db, f"{name} [{f.decode(errors='replace')}]", min(set_ttls) if set_ttls else -1))
-        elif E7["name"] in value_text(rd, k):
-            entries.append((db, name, t))
+def product7_entries():
+    """Every key, in every database, and every hash field that holds product 7, with the expiry that applies to it."""
+    ttls, entries = [], []
+    for dbname in (r.info("keyspace") or {}):
+        db = int(dbname[2:])
+        rd = redis.Redis(port=6379, db=db, socket_timeout=10)
+        for k in rd.scan_iter(count=500):
+            t = rd.ttl(k)
+            name = k.decode(errors="replace")
+            ttls.append((db, name, t))
+            if rd.type(k) == b"hash":
+                # a product may sit in one field of a shared hash with its own field expiry (HEXPIRE / HSETEX),
+                # or be the whole hash; the expiry that applies is the earlier of the key's and the field's
+                for f, v in rd.hgetall(k).items():
+                    if E7["name"] in decode_any(v) or E7["name"] in decode_any(f):
+                        ft = int(rd.execute_command("HTTL", k, "FIELDS", 1, f)[0])
+                        # the field disappears at whichever deadline comes first, the key's or its own
+                        set_ttls = [x for x in (t, ft) if x >= 0]
+                        entries.append((db, f"{name} [{f.decode(errors='replace')}]", min(set_ttls) if set_ttls else -1))
+            elif E7["name"] in value_text(rd, k):
+                entries.append((db, name, t))
+    return ttls, entries
+
+
+ttls, entries = product7_entries()
 facts["keys"] = ttls[:20]
 facts["product7_entries"] = entries[:10]
 if not ttls:
@@ -220,6 +227,13 @@ if p3 == want and p4 != want:
     reasons.append(f"a second read after the update returned {p4!r}, expected {want!r}")
 if g7b > 2:
     reasons.append(f"reads after the update are not served from the cache ({g7b} inventory calls for product 7 in total)")
+# whatever the update wrote to the cache must expire like any other entry (v2, 2026-10-07: was checked only before it)
+_, entries_after = product7_entries()
+facts["product7_entries_after_update"] = entries_after[:10]
+off = [(db, k, t) for db, k, t in entries_after if not 240 <= t <= 300]
+if off:
+    reasons.append(f"after update_price, cached product 7 does not expire in about 5 minutes "
+                   f"({', '.join(f'{k}: TTL {t}' for _, k, t in off[:3])})")
 
 # 6. a second product behaves the same
 q1, _ = agent(READ.format(pid=12))
