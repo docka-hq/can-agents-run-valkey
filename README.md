@@ -24,7 +24,7 @@ The selection prompts in `selection/config.json` ask a model what it would use f
 | Path | Contents |
 |---|---|
 | `inspect_task.py` | The runner: `cari_job` for a job, `cari_selection` for the selection prompts. |
-| `prove_all.py` | Proves every grader with no model calls and no API key: 49 checks. |
+| `prove_all.py` | Proves every grader with no model calls and no API key: 61 checks. |
 | `jobs/*.yaml` | One file per job: prompt, container, starting state, grader. Format and grader rules in `jobs/README.md`. |
 | `jobs/graders/`, `jobs/build_jobs.py` | Grader sources, and the script that inlines them into the YAML files. |
 | `jobs/reference/` | A correct solution per job and known wrong ones. |
@@ -41,10 +41,10 @@ git clone https://github.com/docka-hq/can-agents-run-valkey && cd can-agents-run
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 bash images/build.sh        # builds the 5 images, starts each one, compares versions with the published build
-python3 prove_all.py        # 49 checks, no API key, no model calls
+python3 prove_all.py        # 61 checks, no API key, no model calls
 ```
 
-`build.sh` pins base images by digest and Python packages by version, so server versions and packages match the published build; Debian packages are not pinned, so image ids differ. `prove_all.py` must report 49 of 49 before you trust a run.
+`build.sh` pins base images by digest and Python packages by version, so server versions and packages match the published build; Debian packages are not pinned, so image ids differ. `prove_all.py` must report 61 of 61 before you trust a run.
 
 ## Run an agent
 
@@ -54,6 +54,8 @@ inspect eval inspect_task.py@cari_job -T job=jobs/cache_valkey.yaml \
     --model openrouter/deepseek/deepseek-v4.1-flash --epochs 3
 inspect view                       # every attempt: the messages, each command, the grader's verdict
 ```
+
+An attempt whose grader breaks, with no valid verdict, is recorded as an error and left out of the score, never counted as the model's failure.
 
 The models of the published runs, as Inspect model ids:
 
@@ -97,12 +99,23 @@ The published runs used Docka's own harness, which is not public.
 
 **Different:**
 
-1. **The graders are v2.** They close the gaps two rounds of outside review found: the cache's expiry is checked on the product itself (whole key or hash field, plain, compressed or base64), search wants the full top 5 in order and all 1,000 articles stored, and it checks behaviour (what the server sends `search.py` per query, and whether removing the top article from the server changes the answer), and the old server's expiry deadlines must not move. Re-checked from what the published runs recorded, every published pass also meets the cache and search-order rules; the other checks need a running container and cannot be re-run on old attempts. Details: `jobs/README.md` and the review note in cari-valkey-redis.
+1. **The graders are v2.** They close the gaps three rounds of outside review found: the cache's expiry is checked on the product itself (whole key or hash field, plain, compressed or base64, the sooner expiry counting), search wants the full top 5 in order and all 1,000 supplied articles stored, and it checks behaviour on the runs it scores (a search command in the server for every query, at most 100 KB sent to `search.py` per query, and a correct answer once the top article is removed from the server), and the old server's expiry deadlines must not move. Re-checked from what the published runs recorded, every published pass also meets the cache and search-order rules, and every published search pass stored each article under its id, which the removal check needs; the other checks need a running container and cannot be re-run on old attempts. Details: `jobs/README.md` and the review note in cari-valkey-redis.
 2. **Model settings.** The published runs gave Claude adaptive thinking at effort medium and left the others at provider defaults. This runner leaves every model at Inspect's defaults; pass reasoning options yourself to match.
 3. **No browser fallback** for pages that render only in JavaScript, and **no per-host rate limit** for `fetch_doc`.
 4. **The runaway guard counts messages**, not tool calls: 3M tokens, 60 minutes, about 500 tool calls per attempt.
 
-**Checked on 2026-10-06:** 49 of 49 grader proofs on the images the published runs used, every one with a valid grader verdict and a cleanly running solution; the earlier 35-check set also passed on images freshly built with `build.sh` (the images have not changed since). One live check: DeepSeek V4.1 Flash on the cache job gave 3 of 3, as in the published run (on 2026-10-05, before the nudge and the per-turn limit were added). This is not yet validated across all models and jobs: expect close numbers, not identical ones.
+**Checked on 2026-10-07:** 61 of 61 grader proofs on the images the published runs used, every one with a valid grader verdict and a cleanly running solution; the earlier 35-check set also passed on images freshly built with `build.sh` (the images have not changed since). One live check: DeepSeek V4.1 Flash on the cache job gave 3 of 3, as in the published run (on 2026-10-05, before the nudge and the per-turn limit were added). This is not yet validated across all models and jobs: expect close numbers, not identical ones.
+
+## What the graders cannot see
+
+The graders check the end state and how `search.py` behaves, not how an answer was meant to work, so an answer written to fool them can still pass. The cases we know of:
+
+- **Search: where the similarity is computed.** The three behaviour checks catch every way of computing outside the server we have tried (`prove_all.py` holds them), not every way there is. A `search.py` that takes a few hundred candidates from a server-side search and re-ranks them itself passes, and so does one that answers from a local copy and asks the server only which articles still exist.
+- **Search: the 100 KB limit is a heuristic.** It separates a search reply (2 to 5 KB here) from reading every vector back (over 256 KB). It counts everything the server sends during the query, so another process still using the server at grading time adds to it.
+- **Search: each article must carry its id in the server.** The removal check finds the top article by its id: a key named by it, a record holding it, a vector-set element or its attributes, or its entries in a shared hash. An answer that stores vectors under numbers and keeps the ids elsewhere, in a separate list for example, fails with that reason, although its search may be correct. Every published search pass stored each article under its id.
+- **Cache: the product is found by its name.** In a product split across several keys, only the key holding the name has its expiry checked.
+
+If you find another, open an issue, or add a solution that exploits it to `jobs/reference/`, with or without the fix (see CONTRIBUTING.md).
 
 ## Add a job or a prompt
 

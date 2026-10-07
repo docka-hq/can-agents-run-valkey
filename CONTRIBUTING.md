@@ -26,7 +26,9 @@ A job is one YAML file in `jobs/`, in the format described in `jobs/README.md`, 
 3. **A grader** that runs inside the container after the agent stops, checks the end state, prints one JSON line `{"pass": ..., "reasons": [...], "facts": {...}}` and exits 0 on a pass. Keep its source in `jobs/graders/` and run `python3 jobs/build_jobs.py` to inline it.
 4. **Proofs**: one correct solution that passes and at least one known wrong solution that fails, in `jobs/reference/`. Add them to `prove_all.py`, run it (no model calls), and include the output. A grader that is not proven both ways is not used. A wrong solution that exploits a specific weakness of the grader is the most useful kind.
 
-The grader checks what the prompt asks for, nothing more, and never trusts what the agent says it did. No job may need a secret or an outside account.
+The grader checks what the prompt asks for, nothing more, and never trusts what the agent says it did. If a check needs something the prompt does not ask for, say so in the grader and add it to "What the graders cannot see" in the README: the search grader, for example, can remove an article from the server only if the article's id is stored with it. No job may need a secret or an outside account.
+
+A weakness in an existing grader is as welcome as a new job: send a solution that exploits it, as a known wrong solution in `jobs/reference/`, with or without the fix.
 
 ## What happens next
 

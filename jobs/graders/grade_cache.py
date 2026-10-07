@@ -178,11 +178,13 @@ for dbname in (r.info("keyspace") or {}):
         ttls.append((db, name, t))
         if rd.type(k) == b"hash":
             # a product may sit in one field of a shared hash with its own field expiry (HEXPIRE / HSETEX),
-            # or be the whole hash; the expiry that applies is the field's, else the key's
+            # or be the whole hash; the expiry that applies is the earlier of the key's and the field's
             for f, v in rd.hgetall(k).items():
                 if E7["name"] in decode_any(v) or E7["name"] in decode_any(f):
                     ft = int(rd.execute_command("HTTL", k, "FIELDS", 1, f)[0])
-                    entries.append((db, f"{name} [{f.decode(errors='replace')}]", ft if ft >= 0 else t))
+                    # the field disappears at whichever deadline comes first, the key's or its own
+                    set_ttls = [x for x in (t, ft) if x >= 0]
+                    entries.append((db, f"{name} [{f.decode(errors='replace')}]", min(set_ttls) if set_ttls else -1))
         elif E7["name"] in value_text(rd, k):
             entries.append((db, name, t))
 facts["keys"] = ttls[:20]

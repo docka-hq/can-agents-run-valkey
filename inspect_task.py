@@ -234,9 +234,9 @@ def cari_grader():
             verdict = None
         if not isinstance(verdict, dict) or not isinstance(verdict.get("pass"), bool) \
                 or verdict["pass"] != (r.returncode == 0):
-            # no structured verdict, or one that contradicts the exit code: the grader broke, nothing was graded
-            return Score(value=INCORRECT, explanation=f"GRADER ERROR (exit {r.returncode}): {r.stderr.strip()[-300:]}",
-                         metadata={"grader_error": True, "solution_run": state.metadata.get("solution_run")})
+            # no structured verdict, or one that contradicts the exit code: the grader broke and nothing was graded.
+            # Raised, so the attempt is marked as an error and left out of accuracy instead of counting as a failure.
+            raise RuntimeError(f"GRADER ERROR (exit {r.returncode}): {r.stderr.strip()[-300:]}")
         ok = verdict["pass"]
         return Score(value=CORRECT if ok else INCORRECT, explanation="; ".join(verdict.get("reasons") or []) or "pass",
                      metadata={"grader_error": False, "facts": verdict.get("facts"),
@@ -270,7 +270,8 @@ def cari_job(job: str, solution: str | None = None) -> Task:
     return Task(dataset=[sample], setup=[snapshot_old_server()] if spec["id"].startswith("migrate") else None,
                 solver=reference_solution(solution) if solution else agent, scorer=cari_grader(),
                 sandbox=("docker", str(compose)), config=GenerateConfig(max_tokens=PER_TURN_MAX_TOKENS),
-                token_limit=3_000_000, message_limit=1002, time_limit=3600)
+                token_limit=3_000_000, message_limit=1002, time_limit=3600,
+                fail_on_error=False)   # an errored attempt is reported as an error and kept out of the metrics
 
 
 # --- selection: which store a model picks when nobody names one -------------------------------------------
