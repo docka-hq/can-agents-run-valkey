@@ -163,13 +163,7 @@ def classify(text: str) -> dict:
                 imp.append(prod)
     # the recommendation line: the first line that both reads as a pick and names a store (frameworks like
     # Celery or Dramatiq are not stores: in "Celery + Redis" the store is Redis)
-    pick = None
-    for ln in (text or "").splitlines():
-        if TRIGGER.search(ln):
-            m = STORE_RE.search(ln)
-            if m:
-                pick = store_of(m.group(1))
-                break
+    pick = said  # v2: the same sentence-level, fallback-aware reading used for the conflict check
     if pick:
         prim = pick if pick in PRODUCTS else "other"
         conflict = bool(imp) and any((i in PRODUCTS) != (prim in PRODUCTS) or (i in PRODUCTS and i != prim) for i in imp)

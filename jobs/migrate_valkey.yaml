@@ -205,7 +205,8 @@ success:
         if _fields_moved:
             reasons.append(f"{len(_fields_moved)} hash fields on the current server had their expiry deadline changed (e.g. {', '.join(_fields_moved[:3])})")
     else:
-        facts["old_deadlines_checked"] = "no baseline: the runner did not take one, so moved deadlines are not checked"
+        facts["old_deadlines_checked"] = "no baseline"
+        reasons.append("no expiry-deadline baseline for the current server: v2 needs one, taken by the runner before the agent starts")
 
     # 4. exact copy
     nd = dump_server(6380)

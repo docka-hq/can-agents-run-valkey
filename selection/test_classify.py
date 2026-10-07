@@ -31,6 +31,9 @@ CASES = [
     ("I'd use RabbitMQ as the broker.\n```bash\ndocker run -d redis:7\n```\nRedis is optional, for results.", "redis", True),
     ("```python\nimport sqlite3\n```\nA SQLite table is enough here.", "other", None),
     ("I recommend pgvector.\n```python\nimport psycopg\n```", "other", None),
+    # second outside review: the final branch must use the same reading as the conflict check
+    ("Use Redis-compatible Valkey.", "valkey", None),
+    ("If unavailable, use Redis.\nI recommend Valkey.", "valkey", None),
 ]
 
 

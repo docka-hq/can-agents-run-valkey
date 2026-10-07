@@ -57,6 +57,12 @@ SNAPSHOT = r"""
 import json, redis
 out = {"keys": {}, "fields": {}}
 r0 = redis.Redis(port=6379, socket_timeout=10)
+info = r0.info("server")
+ver = tuple(int(x) for x in str(info.get("valkey_version") or info.get("redis_version")).split(".")[:2])
+# hash-field expiry exists from Redis 7.4 and Valkey 9.0; on those servers a failure is an error, never "unsupported"
+fields_supported = ver >= ((9, 0) if "valkey_version" in info else (7, 4))
+out["server"] = {"name": "valkey" if "valkey_version" in info else "redis", "version": ".".join(map(str, ver)),
+                 "field_expiry": fields_supported}
 for dbname in (r0.info("keyspace") or {}):
     db = int(dbname[2:]); rd = redis.Redis(port=6379, db=db, socket_timeout=10)
     keys = list(rd.scan_iter(count=1000))
@@ -67,13 +73,10 @@ for dbname in (r0.info("keyspace") or {}):
         if int(t) > 0:
             out["keys"].setdefault(str(db), {})[k.hex()] = int(t)
     for k in keys:
-        if rd.type(k) != b"hash":
+        if not fields_supported or rd.type(k) != b"hash":
             continue
-        try:
-            fs = rd.hkeys(k)
-            ts = rd.execute_command("HEXPIRETIME", k, "FIELDS", len(fs), *fs)
-        except Exception:
-            break   # no field expiry on this server (Redis 7.2)
+        fs = rd.hkeys(k)
+        ts = rd.execute_command("HEXPIRETIME", k, "FIELDS", len(fs), *fs)
         fx = {f.hex(): int(t) for f, t in zip(fs, ts) if int(t) > 0}
         if fx:
             out["fields"].setdefault(str(db), {})[k.hex()] = fx
@@ -224,15 +227,20 @@ def cari_grader():
         if state.metadata.get("old_deadlines"):
             await sandbox().write_file(DEADLINES, state.metadata["old_deadlines"])
         r = await sandbox().exec(["bash", "-c", state.metadata["grader"]], timeout=1800)
-        line = next((ln for ln in reversed(r.stdout.splitlines()) if ln.startswith("{")), "{}")
+        line = next((ln for ln in reversed(r.stdout.splitlines()) if ln.startswith("{")), "")
         try:
             verdict = json.loads(line)
         except json.JSONDecodeError:
-            verdict = {}
-        ok = r.returncode == 0 and verdict.get("pass") is True
-        reasons = verdict.get("reasons") or ([] if ok else [f"grader exit {r.returncode}: {r.stderr.strip()[-300:]}"])
-        return Score(value=CORRECT if ok else INCORRECT, explanation="; ".join(reasons) or "pass",
-                     metadata={"facts": verdict.get("facts")})
+            verdict = None
+        if not isinstance(verdict, dict) or not isinstance(verdict.get("pass"), bool) \
+                or verdict["pass"] != (r.returncode == 0):
+            # no structured verdict, or one that contradicts the exit code: the grader broke, nothing was graded
+            return Score(value=INCORRECT, explanation=f"GRADER ERROR (exit {r.returncode}): {r.stderr.strip()[-300:]}",
+                         metadata={"grader_error": True, "solution_run": state.metadata.get("solution_run")})
+        ok = verdict["pass"]
+        return Score(value=CORRECT if ok else INCORRECT, explanation="; ".join(verdict.get("reasons") or []) or "pass",
+                     metadata={"grader_error": False, "facts": verdict.get("facts"),
+                               "solution_run": state.metadata.get("solution_run")})
     return score
 
 

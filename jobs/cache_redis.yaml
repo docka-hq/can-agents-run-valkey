@@ -156,35 +156,49 @@ success:
                        f"the second read must come from the shared cache)")
 
     # 4. the cache lives in the provided server, and the cached product itself expires in ~5 minutes
-    def value_text(rd, k) -> str:
-        """The key's value as text, whatever the type, so a cached product is found by content, not by key name."""
+    def decode_any(v) -> str:
+        """Bytes as text, unwrapping zlib, gzip and base64 (in any order, up to three layers) so a cached product is found
+        by content whatever the encoding. Supported: plain, JSON, pickle/msgpack (names stay readable), zlib, gzip,
+        base64 and their combinations."""
+        import base64
+        import binascii
         import gzip
         import zlib
+        if not isinstance(v, (bytes, bytearray)):
+            return str(v)
+        seen = [bytes(v)]
+        for _ in range(3):
+            cur = seen[-1]
+            for unpack in (zlib.decompress, gzip.decompress,
+                           lambda b: base64.b64decode(b, validate=True), lambda b: base64.urlsafe_b64decode(b)):
+                try:
+                    out = unpack(cur)
+                except (zlib.error, OSError, EOFError, binascii.Error, ValueError):
+                    continue
+                if out and out != cur:
+                    seen.append(out)
+                    break
+            else:
+                break
+        return " ".join(x.decode("utf-8", "replace") for x in seen)
+
+
+    def value_text(rd, k) -> str:
         try:
             t = rd.type(k).decode()
             if t == "string":
-                v = rd.get(k) or b""
-                for unpack in (zlib.decompress, gzip.decompress):
-                    try:
-                        v = unpack(v)
-                        break
-                    except Exception:  # noqa: BLE001
-                        pass
-            elif t == "hash":
-                v = b" ".join(a + b" " + b for a, b in rd.hgetall(k).items())
-            elif t == "ReJSON-RL":
-                v = rd.execute_command("JSON.GET", k) or b""
-            elif t == "list":
-                v = b" ".join(rd.lrange(k, 0, -1))
-            elif t == "set":
-                v = b" ".join(rd.smembers(k))
-            elif t == "zset":
-                v = b" ".join(rd.zrange(k, 0, -1))
-            else:
-                return ""
+                return decode_any(rd.get(k) or b"")
+            if t == "ReJSON-RL":
+                return decode_any(rd.execute_command("JSON.GET", k) or b"")
+            if t == "list":
+                return " ".join(decode_any(x) for x in rd.lrange(k, 0, -1))
+            if t == "set":
+                return " ".join(decode_any(x) for x in rd.smembers(k))
+            if t == "zset":
+                return " ".join(decode_any(x) for x in rd.zrange(k, 0, -1))
         except Exception:  # noqa: BLE001
             return ""
-        return v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v)
+        return ""
 
 
     ttls, entries = [], []
@@ -195,7 +209,14 @@ success:
             t = rd.ttl(k)
             name = k.decode(errors="replace")
             ttls.append((db, name, t))
-            if E7["name"] in value_text(rd, k):
+            if rd.type(k) == b"hash":
+                # a product may sit in one field of a shared hash with its own field expiry (HEXPIRE / HSETEX),
+                # or be the whole hash; the expiry that applies is the field's, else the key's
+                for f, v in rd.hgetall(k).items():
+                    if E7["name"] in decode_any(v) or E7["name"] in decode_any(f):
+                        ft = int(rd.execute_command("HTTL", k, "FIELDS", 1, f)[0])
+                        entries.append((db, f"{name} [{f.decode(errors='replace')}]", ft if ft >= 0 else t))
+            elif E7["name"] in value_text(rd, k):
                 entries.append((db, name, t))
     facts["keys"] = ttls[:20]
     facts["product7_entries"] = entries[:10]

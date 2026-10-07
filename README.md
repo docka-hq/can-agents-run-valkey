@@ -17,14 +17,14 @@ Real jobs an AI agent is asked to do on a server, graded on the server's end sta
 | Copy production data off Redis 7.2, exactly | `jobs/migrate_valkey.yaml` | `jobs/migrate_redis.yaml` | Valkey 15/15, Redis 15/15 |
 | Copy production data off Redis 8.10, where replication and DUMP/RESTORE do not work | `jobs/migrate8_valkey.yaml` | none | 11/15 |
 
-The selection prompts in `selection/config.json` ask a model what it would use for a cache, a job queue, a semantic cache, a managed store on AWS, and a cache an agent runs itself. Published: Valkey in 0 of 75 answers to the first three (two of those prompts name Python), 16 of 25 on AWS, 19 of 25 for the agent. The prompts differ in more than who is asking.
+The selection prompts in `selection/config.json` ask a model what it would use for a cache, a job queue, a semantic cache, a managed store on AWS, and a cache an agent runs itself. Published: Valkey in 0 of 75 answers to the first three (two of those prompts name Python), 17 of 25 on AWS (corrected from 16 after an outside review), 19 of 25 for the agent. The prompts differ in more than who is asking.
 
 ## What is where
 
 | Path | Contents |
 |---|---|
 | `inspect_task.py` | The runner: `cari_job` for a job, `cari_selection` for the selection prompts. |
-| `prove_all.py` | Proves every grader with no model calls and no API key: 35 checks. |
+| `prove_all.py` | Proves every grader with no model calls and no API key: 49 checks. |
 | `jobs/*.yaml` | One file per job: prompt, container, starting state, grader. Format and grader rules in `jobs/README.md`. |
 | `jobs/graders/`, `jobs/build_jobs.py` | Grader sources, and the script that inlines them into the YAML files. |
 | `jobs/reference/` | A correct solution per job and known wrong ones. |
@@ -41,10 +41,10 @@ git clone https://github.com/docka-hq/can-agents-run-valkey && cd can-agents-run
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 bash images/build.sh        # builds the 5 images, starts each one, compares versions with the published build
-python3 prove_all.py        # 35 checks, no API key, no model calls
+python3 prove_all.py        # 49 checks, no API key, no model calls
 ```
 
-`build.sh` pins base images by digest and Python packages by version, so server versions and packages match the published build; Debian packages are not pinned, so image ids differ. `prove_all.py` must report 35 of 35 before you trust a run.
+`build.sh` pins base images by digest and Python packages by version, so server versions and packages match the published build; Debian packages are not pinned, so image ids differ. `prove_all.py` must report 49 of 49 before you trust a run.
 
 ## Run an agent
 
@@ -97,12 +97,12 @@ The published runs used Docka's own harness, which is not public.
 
 **Different:**
 
-1. **The graders are v2.** They close four gaps an outside review found in v1: the cache TTL is checked on the keys that hold the product, search wants the full top 5 in order and all 1,000 articles searchable and fails a `search.py` that reads the data back, and the old server's expiry deadlines must not move. Re-checked from what the published runs recorded, every published pass also meets the cache and search-order rules; the other checks need a running container and cannot be re-run on old attempts. Details: `jobs/README.md` and the review note in cari-valkey-redis.
+1. **The graders are v2.** They close the gaps two rounds of outside review found: the cache's expiry is checked on the product itself (whole key or hash field, plain, compressed or base64), search wants the full top 5 in order and all 1,000 articles stored, and it checks behaviour (what the server sends `search.py` per query, and whether removing the top article from the server changes the answer), and the old server's expiry deadlines must not move. Re-checked from what the published runs recorded, every published pass also meets the cache and search-order rules; the other checks need a running container and cannot be re-run on old attempts. Details: `jobs/README.md` and the review note in cari-valkey-redis.
 2. **Model settings.** The published runs gave Claude adaptive thinking at effort medium and left the others at provider defaults. This runner leaves every model at Inspect's defaults; pass reasoning options yourself to match.
 3. **No browser fallback** for pages that render only in JavaScript, and **no per-host rate limit** for `fetch_doc`.
 4. **The runaway guard counts messages**, not tool calls: 3M tokens, 60 minutes, about 500 tool calls per attempt.
 
-**Checked on 2026-10-06:** 35 of 35 grader proofs on the images the published runs used, and 35 of 35 on images freshly built with `build.sh`. One live check: DeepSeek V4.1 Flash on the cache job gave 3 of 3, as in the published run (on 2026-10-05, before the nudge and the per-turn limit were added). This is not yet validated across all models and jobs: expect close numbers, not identical ones.
+**Checked on 2026-10-06:** 49 of 49 grader proofs on the images the published runs used, every one with a valid grader verdict and a cleanly running solution; the earlier 35-check set also passed on images freshly built with `build.sh` (the images have not changed since). One live check: DeepSeek V4.1 Flash on the cache job gave 3 of 3, as in the published run (on 2026-10-05, before the nudge and the per-turn limit were added). This is not yet validated across all models and jobs: expect close numbers, not identical ones.
 
 ## Add a job or a prompt
 

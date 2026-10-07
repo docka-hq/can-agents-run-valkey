@@ -11,7 +11,7 @@
 3. **Then the line that states the choice** ("I'd use Redis"), read in context.
 4. A client library never counts: the redis Python client talks to Valkey too.
 
-v2 (2026-10-06) adds two rules. A managed service named only as a fallback ("If unavailable, use ElastiCache for Redis") is not the pick. And an answer whose deciding evidence and stated choice name different stores is marked `conflict` for a second look, instead of being coded silently. On the 125 published answers, v2 gives every answer the script coded the same code as v1, and flags two for a second look; both keep their published code (see the review note in cari-valkey-redis).
+v2 (2026-10-06) adds two rules. A managed service named only as a fallback ("If unavailable, use ElastiCache for Redis") is not the pick. And an answer whose deciding evidence and stated choice name different stores is marked `conflict` for a second look, instead of being coded silently. On the 125 published answers, v2 codes one differently from v1: a v1 misreading of "Redis-compatible engine", now corrected in the published counts (AWS 16 → 17 of 25). It flags two more for a second look; both keep their published code. Details in the review note in cari-valkey-redis.
 
     python3 selection/kv_classify.py answer.md           # code one answer
     python3 selection/test_classify.py ../cari-valkey-redis   # regression cases + every published answer
