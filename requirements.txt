@@ -1,0 +1,6 @@
+# Tested 2026-10-06: Python 3.12 on Linux (Docker 29.6, Compose 5.3) for everything; Python 3.14 on macOS for selection.
+inspect-ai==0.3.276
+pyyaml==6.0.3
+httpx==0.28.1
+openai==3.24.0       # Inspect's OpenRouter and OpenAI providers
+anthropic==1.11.0    # only needed to run Claude

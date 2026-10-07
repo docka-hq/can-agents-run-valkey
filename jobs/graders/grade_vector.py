@@ -4,10 +4,14 @@
 #
 # What "done" means (from the prompt): `python3 /app/search.py < query.json` prints the 5 most similar
 # article ids, most similar first, and the similarity search runs INSIDE the server.
-#   - correctness: top-1 exact and >= 4 of the true top-5 for every query (an approximate index may
-#     swap the tail; queries were generated with a >= 0.10 top-1 margin and >= 0.02 at rank 5/6)
-#   - inside the server: MONITOR sees FT.SEARCH / FT.AGGREGATE / VSIM while search.py runs, and the
-#     article file is moved away during grading so it cannot be read
+#   - correctness: the true top-5, in order, for every query (v2; v1 took top-1 exact and >= 4 of 5.
+#     Queries were generated with a >= 0.10 top-1 margin and >= 0.02 at rank 5/6)
+#   - all 1,000 articles are searchable in the server: an index with >= 1,000 documents or a vector set
+#     with >= 1,000 elements (v2; v1 did not count)
+#   - inside the server: MONITOR sees FT.SEARCH / FT.AGGREGATE / VSIM while search.py runs, search.py
+#     does not scan the keyspace or read more than 50 items one by one (v2: so the answer cannot be
+#     computed outside the server from data read back), and the article file is moved away during
+#     grading so it cannot be read
 import json
 import os
 import re
@@ -42,6 +46,29 @@ try:
     if not identity(r):
         reasons.append(f"server on 6379 is not the provided {CFG['product']} {CFG['version']}: {facts.get('server')}")
     facts["dbsize"] = r.dbsize()
+    searchable = {}
+    try:
+        for name in r.execute_command("FT._LIST") or []:
+            name = name.decode() if isinstance(name, bytes) else str(name)
+            info = r.execute_command("FT.INFO", name)
+            if isinstance(info, dict):
+                d = {(k.decode() if isinstance(k, bytes) else str(k)): v for k, v in info.items()}
+            else:
+                d = {(info[j].decode() if isinstance(info[j], bytes) else str(info[j])): info[j + 1]
+                     for j in range(0, len(info) - 1, 2)}
+            nd = d.get("num_docs", 0)
+            searchable[f"index {name}"] = int(float(nd.decode() if isinstance(nd, bytes) else nd or 0))
+    except Exception as e:  # noqa: BLE001
+        searchable["FT._LIST"] = f"{type(e).__name__}"
+    for k in r.scan_iter(count=1000):
+        try:
+            if r.type(k) == b"vectorset":
+                searchable[f"vector set {k.decode(errors='replace')}"] = int(r.execute_command("VCARD", k))
+        except Exception:  # noqa: BLE001
+            pass
+    facts["searchable"] = searchable
+    if max([v for v in searchable.values() if isinstance(v, int)] or [0]) < 1000:
+        reasons.append(f"not all 1,000 articles are searchable in the server ({searchable or 'no index or vector set'})")
 except Exception as e:  # noqa: BLE001
     reasons.append(f"server on 6379 unreachable: {type(e).__name__}: {e}")
     finish()
@@ -80,7 +107,7 @@ try:
         ids = ids[:5]
         truth = CFG["top5"][i]
         results.append({"ids": ids, "exit": p.returncode, "top1_ok": bool(ids) and ids[0] == truth[0],
-                        "overlap": len(set(ids) & set(truth)), "stderr": p.stderr.strip()[-200:]})
+                        "overlap": len(set(ids) & set(truth)), "exact": ids == truth, "stderr": p.stderr.strip()[-200:]})
 finally:
     time.sleep(0.3)
     mon.terminate()
@@ -97,12 +124,21 @@ facts["server_side_search_commands"] = cmds
 facts["queries"] = results
 if not cmds:
     reasons.append("no similarity search ran inside the server while search.py ran (no FT.SEARCH / FT.AGGREGATE / VSIM seen)")
+called = [c.upper() for c in re.findall(r'\] "([A-Za-z_.]+)"', mon_text)]
+scans = sorted({c for c in called if c in ("SCAN", "KEYS", "HSCAN", "SSCAN", "ZSCAN")})
+item_reads = sum(1 for c in called if c in ("GET", "MGET", "HGET", "HGETALL", "HMGET", "JSON.GET", "JSON.MGET",
+                                             "VEMB", "VGETATTR", "LRANGE", "SMEMBERS", "ZRANGE", "DUMP"))
+facts["search_py_reads"] = {"scans": scans, "item_reads": item_reads}
+if scans:
+    reasons.append(f"search.py scanned the keyspace while answering ({', '.join(scans)}): the answer may not come from the server's search")
+if item_reads > 50:
+    reasons.append(f"search.py read {item_reads} items one by one while answering 5 queries: the similarity may be computed outside the server")
 for i, res in enumerate(results):
     if res.get("error"):
         reasons.append(f"query {i + 1}: {res['error']}")
     elif res["exit"] != 0:
         reasons.append(f"query {i + 1}: search.py exited {res['exit']}: {res['stderr']!r}")
-    elif not res["top1_ok"] or res["overlap"] < 4:
-        reasons.append(f"query {i + 1}: returned {res['ids']}, expected top-5 {CFG['top5'][i]} "
+    elif not res["exact"]:
+        reasons.append(f"query {i + 1}: returned {res['ids']}, expected {CFG['top5'][i]} in this order "
                        f"(top-1 {'ok' if res['top1_ok'] else 'wrong'}, {res['overlap']}/5 overlap)")
 finish()

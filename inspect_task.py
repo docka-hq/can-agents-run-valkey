@@ -27,6 +27,7 @@ from __future__ import annotations
 import html as _html
 import importlib.util
 import json
+import os
 import pathlib
 import tempfile
 from html.parser import HTMLParser
@@ -35,7 +36,7 @@ import httpx
 import yaml
 from inspect_ai import Task, task
 from inspect_ai.dataset import Sample
-from inspect_ai.model import GenerateConfig
+from inspect_ai.model import ChatMessageUser, GenerateConfig
 from inspect_ai.scorer import CORRECT, INCORRECT, Score, Target, accuracy, mean, scorer
 from inspect_ai.solver import Generate, TaskState, generate, solver, system_message, use_tools
 from inspect_ai.tool import tool
@@ -43,6 +44,41 @@ from inspect_ai.util import sandbox
 
 HERE = pathlib.Path(__file__).resolve().parent
 SYSTEM_PROMPT = (HERE / "jobs" / "system_prompt.txt").read_text().strip()
+PER_TURN_MAX_TOKENS = 64000          # as in the published runs (per_turn_max_tokens)
+NUDGE = ("[Your previous turn contained no tool call and ended at the per-turn output limit or empty. "
+         "Continue the job with the next tool call, or state clearly that the task is complete.]")
+GRADER_PY = "/opt/kv-grader/bin/python"
+IMAGE_PREFIX = os.environ.get("CARI_IMAGE_PREFIX", "")   # e.g. "test-" for images built with TAG_PREFIX=test-
+DEADLINES = "/var/tmp/.kvg-old-deadlines.json"
+
+# Old-server expiry deadlines, taken before the agent starts (migration jobs). Kept in the runner, outside the
+# container, and written for the grader only after the agent has stopped.
+SNAPSHOT = r"""
+import json, redis
+out = {"keys": {}, "fields": {}}
+r0 = redis.Redis(port=6379, socket_timeout=10)
+for dbname in (r0.info("keyspace") or {}):
+    db = int(dbname[2:]); rd = redis.Redis(port=6379, db=db, socket_timeout=10)
+    keys = list(rd.scan_iter(count=1000))
+    p = rd.pipeline(transaction=False)
+    for k in keys:
+        p.execute_command("EXPIRETIME", k)
+    for k, t in zip(keys, p.execute()):
+        if int(t) > 0:
+            out["keys"].setdefault(str(db), {})[k.hex()] = int(t)
+    for k in keys:
+        if rd.type(k) != b"hash":
+            continue
+        try:
+            fs = rd.hkeys(k)
+            ts = rd.execute_command("HEXPIRETIME", k, "FIELDS", len(fs), *fs)
+        except Exception:
+            break   # no field expiry on this server (Redis 7.2)
+        fx = {f.hex(): int(t) for f, t in zip(fs, ts) if int(t) > 0}
+        if fx:
+            out["fields"].setdefault(str(db), {})[k.hex()] = fx
+print(json.dumps(out))
+"""
 
 # The image's own CMD starts the servers and then sleeps, so no `command` here: Inspect's default
 # (`tail -f /dev/null`) would leave them stopped. Open network, as in the published runs.
@@ -148,10 +184,45 @@ def fetch_doc_tool():
     return execute
 
 
-# --- the grader, unchanged, inside the container ------------------------------------------------------
+# --- the agent loop, as in the published harness ----------------------------------------------------------
+@solver
+def cari_agent():
+    """One model turn at a time. A turn without a tool call that came back empty or cut at the per-turn limit gets
+    one nudge; a second such turn in a row ends the attempt. Any other turn without a tool call ends it."""
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        nudged = False
+        while True:
+            state = await generate(state, tool_calls="single")
+            out = state.output
+            if out.message.tool_calls:
+                nudged = False
+                continue
+            cut = out.stop_reason in ("max_tokens", "model_length") or not (out.completion or "").strip()
+            if cut and not nudged:
+                nudged = True
+                state.messages.append(ChatMessageUser(content=NUDGE))
+                continue
+            return state
+    return solve
+
+
+@solver
+def snapshot_old_server():
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        r = await sandbox().exec([GRADER_PY, "-c", SNAPSHOT], timeout=300)
+        if r.returncode != 0:
+            raise RuntimeError(f"could not snapshot the current server's deadlines: {r.stderr[-300:]}")
+        state.metadata["old_deadlines"] = r.stdout.strip()
+        return state
+    return solve
+
+
+# --- the grader, inside the container ------------------------------------------------------
 @scorer(metrics=[accuracy()])
 def cari_grader():
     async def score(state: TaskState, target: Target) -> Score:
+        if state.metadata.get("old_deadlines"):
+            await sandbox().write_file(DEADLINES, state.metadata["old_deadlines"])
         r = await sandbox().exec(["bash", "-c", state.metadata["grader"]], timeout=1800)
         line = next((ln for ln in reversed(r.stdout.splitlines()) if ln.startswith("{")), "{}")
         try:
@@ -183,13 +254,14 @@ def cari_job(job: str, solution: str | None = None) -> Task:
     spec = yaml.safe_load((HERE / job).read_text())
     box = spec["sandbox"]
     compose = pathlib.Path(tempfile.mkdtemp(prefix="cari-")) / "compose.yaml"
-    compose.write_text(COMPOSE.format(image=box["base_image"], mem=box.get("memory", "1g"), cpus=box.get("cpus", 1.0)))
+    compose.write_text(COMPOSE.format(image=IMAGE_PREFIX + box["base_image"], mem=box.get("memory", "1g"), cpus=box.get("cpus", 1.0)))
     ready = box.get("ready_cmd", "true")
     sample = Sample(id=spec["id"], input=spec["prompt"], metadata={"grader": spec["success"]["payload"]},
                     setup=f"for i in $(seq 600); do {ready} && exit 0; sleep 0.2; done; echo 'server not ready' >&2; exit 1")
-    agent = [system_message(SYSTEM_PROMPT), use_tools([exec_tool(), fetch_doc_tool()]), generate()]
-    return Task(dataset=[sample], solver=reference_solution(solution) if solution else agent, scorer=cari_grader(),
-                sandbox=("docker", str(compose)),
+    agent = [system_message(SYSTEM_PROMPT), use_tools([exec_tool(), fetch_doc_tool()]), cari_agent()]
+    return Task(dataset=[sample], setup=[snapshot_old_server()] if spec["id"].startswith("migrate") else None,
+                solver=reference_solution(solution) if solution else agent, scorer=cari_grader(),
+                sandbox=("docker", str(compose)), config=GenerateConfig(max_tokens=PER_TURN_MAX_TOKENS),
                 token_limit=3_000_000, message_limit=1002, time_limit=3600)
 
 

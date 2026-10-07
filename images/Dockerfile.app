@@ -11,15 +11,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /bin/bash /bin/sh
 # client libraries an engineer would reach for, for BOTH products (the agent chooses)
-RUN pip3 install --no-cache-dir redis valkey numpy && pip3 list --format=json > /opt/pip-system.json
+RUN pip3 install --no-cache-dir redis==8.1.0 valkey==6.1.1 numpy==2.5.3 && pip3 list --format=json > /opt/pip-system.json
 # the grader's own environment (agent-independent)
-RUN python3 -m venv /opt/kv-grader && /opt/kv-grader/bin/pip install --no-cache-dir redis \
+RUN python3 -m venv /opt/kv-grader && /opt/kv-grader/bin/pip install --no-cache-dir redis==8.1.0 \
     && /opt/kv-grader/bin/pip list --format=json > /opt/pip-grader.json
 COPY assets/app/ /app/
 COPY assets/upstream/ /opt/upstream/
 COPY assets/data/ /data/
 COPY assets/conf/${PRODUCT}.conf /etc/${PRODUCT}/${PRODUCT}.conf
-COPY assets/kv-start-app.sh /usr/local/sbin/kv-start
+COPY --chmod=0755 assets/kv-start-app.sh /usr/local/sbin/kv-start
 WORKDIR /root
 ENTRYPOINT []
 CMD ["/usr/local/sbin/kv-start"]

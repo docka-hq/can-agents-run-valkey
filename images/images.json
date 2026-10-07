@@ -14,6 +14,9 @@
     "numpy": "2.5.3",
     "redis": "8.1.0",
     "valkey": "6.1.1"
+   },
+   "pip_grader": {
+    "redis": "8.1.0"
    }
   },
   "cari-kv-app:redis-8.10": {
@@ -24,6 +27,9 @@
     "numpy": "2.5.3",
     "redis": "8.1.0",
     "valkey": "6.1.1"
+   },
+   "pip_grader": {
+    "redis": "8.1.0"
    }
   },
   "cari-kv-mig:valkey-9.1": {
@@ -33,6 +39,9 @@
    "pip": {
     "redis": "8.1.0",
     "valkey": "6.1.1"
+   },
+   "pip_grader": {
+    "redis": "8.1.0"
    }
   },
   "cari-kv-mig:redis-8.10": {
@@ -42,7 +51,23 @@
    "pip": {
     "redis": "8.1.0",
     "valkey": "6.1.1"
+   },
+   "pip_grader": {
+    "redis": "8.1.0"
+   }
+  },
+  "cari-kv-mig8:valkey-9.1": {
+   "id": "sha256:76eb9f172fea9d850a6ccfe16c04c8456afb0660d004040e966fdedb4747d3a9",
+   "server": "Valkey server v=9.1.2 sha=00000000:0 malloc=jemalloc-5.3.0 bits=64 build=16129465b18d72a",
+   "old_server": "Redis server v=8.10.2 sha=00000000:1 malloc=jemalloc-5.3.0 bits=64 build=fbc5ac9ab55dc180",
+   "pip": {
+    "redis": "8.1.0",
+    "valkey": "6.1.1"
+   },
+   "pip_grader": {
+    "redis": "8.1.0"
    }
   }
- }
+ },
+ "note": "The build the published runs used. pip_grader and the cari-kv-mig8 entry were read on 2026-10-06 from the published images, whose ids match the frozen configs in cari-valkey-redis."
 }

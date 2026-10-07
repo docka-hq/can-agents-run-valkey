@@ -1,14 +1,14 @@
 # Can agents run Valkey? Test kit
 
-Agent tests for [Valkey](https://valkey.io), by [Docka](https://docka.ai). Real jobs an AI agent is asked to do on a Valkey server, graded on the server's end state, and the prompts that ask a model which store it would pick. Run them on any model with your own API key, add your own, and rerun when a model or Valkey changes.
+A public kit for rerunning the tasks behind [Can agents run Valkey?](https://lab.docka.ai/can-agents-run-it/valkey/) with [Inspect AI](https://inspect.aisi.org.uk), on any model with your own API key, and for adding your own. By [Docka](https://docka.ai).
 
-Published results, October 2026: https://lab.docka.ai/can-agents-run-it/valkey/
-Every answer and attempt from those runs: https://lab.docka.ai/can-agents-run-it/valkey/explore/
-The frozen data behind them: https://github.com/docka-hq/cari-valkey-redis
+- Published results, October 2026: https://lab.docka.ai/can-agents-run-it/valkey/
+- Every answer and attempt from those runs: https://lab.docka.ai/can-agents-run-it/valkey/explore/
+- The frozen data, prompts and graders behind them: https://github.com/docka-hq/cari-valkey-redis
 
 ## The jobs
 
-Each Valkey job has a Redis twin as a baseline. The two prompts differ only in the product's name, version and config path.
+Real jobs an AI agent is asked to do on a server, graded on the server's end state after the agent stops. Each Valkey job has a Redis twin as a baseline; the two prompts differ only in the product's name, version and config path.
 
 | Job | Valkey | Redis baseline | Published, 5 models × 3 attempts |
 |---|---|---|---|
@@ -17,57 +17,63 @@ Each Valkey job has a Redis twin as a baseline. The two prompts differ only in t
 | Copy production data off Redis 7.2, exactly | `jobs/migrate_valkey.yaml` | `jobs/migrate_redis.yaml` | Valkey 15/15, Redis 15/15 |
 | Copy production data off Redis 8.10, where replication and DUMP/RESTORE do not work | `jobs/migrate8_valkey.yaml` | none | 11/15 |
 
-The selection prompts in `selection/config.json` ask a model what it would use for a cache, a job queue, a semantic cache, a managed store on AWS, and a cache an agent runs itself. Published: Valkey in 0 of 75 answers to the first three, 16 of 25 on AWS, 19 of 25 for the agent.
+The selection prompts in `selection/config.json` ask a model what it would use for a cache, a job queue, a semantic cache, a managed store on AWS, and a cache an agent runs itself. Published: Valkey in 0 of 75 answers to the first three (two of those prompts name Python), 16 of 25 on AWS, 19 of 25 for the agent. The prompts differ in more than who is asking.
 
 ## What is where
 
 | Path | Contents |
 |---|---|
-| `inspect_task.py` | The runner, on Inspect AI. |
-| `jobs/*.yaml` | One file per job: the prompt, the container, the starting state and the grader. Format in `jobs/README.md`. |
-| `jobs/graders/` | The grader sources; each YAML carries its grader inline. |
-| `jobs/reference/` | A correct solution per job and known wrong ones, to prove a grader. |
-| `jobs/system_prompt.txt` | The system prompt every agent gets. |
-| `selection/` | The selection prompts and the classifier that codes answers. |
-| `images/` | Dockerfiles and assets for the job containers. |
+| `inspect_task.py` | The runner: `cari_job` for a job, `cari_selection` for the selection prompts. |
+| `prove_all.py` | Proves every grader with no model calls and no API key: 35 checks. |
+| `jobs/*.yaml` | One file per job: prompt, container, starting state, grader. Format and grader rules in `jobs/README.md`. |
+| `jobs/graders/`, `jobs/build_jobs.py` | Grader sources, and the script that inlines them into the YAML files. |
+| `jobs/reference/` | A correct solution per job and known wrong ones. |
+| `selection/` | The selection prompts, the classifier and its regression tests. |
+| `images/` | Dockerfiles, assets, `build.sh`, and `images.json`, the record of the published build. |
+| `requirements.txt` | The Python packages, at the versions tested. |
 
-## Run it
+## Set up
 
-The jobs and the selection prompts run unchanged on [Inspect AI](https://inspect.aisi.org.uk), the open evaluation framework from the UK AI Security Institute. For a job, `inspect_task.py` starts the job's container, gives the agent our system prompt and two tools (`exec` runs a shell command in the container, `fetch_doc` reads a web page), and uses the job's own grader as the scorer. For selection, it sends each prompt as the only message and codes the answer with `selection/kv_classify.py`.
-
-**1. Build the images** (Docker):
+You need Linux or macOS, Docker with Compose v2 and the daemon running, Python 3.10 or newer (tested on 3.12), about 3 GB of disk for the images, and 1 CPU and 1 GB of memory for each attempt running at once (`prove_all.py` runs 4 at a time).
 
 ```bash
-bash images/build.sh
+git clone https://github.com/docka-hq/can-agents-run-valkey && cd can-agents-run-valkey
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+bash images/build.sh        # builds the 5 images, starts each one, compares versions with the published build
+python3 prove_all.py        # 35 checks, no API key, no model calls
 ```
 
-Base images are pulled by tag. The digests of the published runs are in the frozen configs of [cari-valkey-redis](https://github.com/docka-hq/cari-valkey-redis/tree/main/jobs/config).
+`build.sh` pins base images by digest and Python packages by version, so server versions and packages match the published build; Debian packages are not pinned, so image ids differ. `prove_all.py` must report 35 of 35 before you trust a run.
 
-**2. Install and set a key:**
-
-```bash
-pip install inspect_ai pyyaml httpx openai    # add anthropic to run Claude
-export OPENROUTER_API_KEY=...
-```
-
-**3. Prove a grader, with no model calls.** A reference solution plays the agent:
+## Run an agent
 
 ```bash
-inspect eval inspect_task.py@cari_job -T job=jobs/cache_valkey.yaml \
-    -T solution=jobs/reference/cache_ok.sh --model mockllm/model          # expect 1.0
-inspect eval inspect_task.py@cari_job -T job=jobs/cache_valkey.yaml \
-    -T solution=jobs/reference/cache_no_invalidate.sh --model mockllm/model   # expect 0.0
-```
-
-**4. Run an agent, three attempts:**
-
-```bash
+export OPENROUTER_API_KEY=...      # or ANTHROPIC_API_KEY for Claude
 inspect eval inspect_task.py@cari_job -T job=jobs/cache_valkey.yaml \
     --model openrouter/deepseek/deepseek-v4.1-flash --epochs 3
-inspect view     # every attempt: the messages, each command, the grader's verdict
+inspect view                       # every attempt: the messages, each command, the grader's verdict
 ```
 
-**5. Ask the selection prompts, or your own:**
+The models of the published runs, as Inspect model ids:
+
+| Model | `--model` | Published settings |
+|---|---|---|
+| Claude Opus 5.5 | `anthropic/claude-opus-5-5` | Anthropic API, adaptive thinking, effort medium |
+| GPT-6 Sol | `openrouter/openai/gpt-6-sol` | OpenRouter, provider defaults |
+| DeepSeek V4.1 Flash | `openrouter/deepseek/deepseek-v4.1-flash` | OpenRouter, provider defaults |
+| GLM-5.3-Flash | `openrouter/z-ai/glm-5.3-flash` | OpenRouter, provider defaults |
+| MiMo-V2.6-Flash | `openrouter/xiaomi/mimo-v2.6-flash` | OpenRouter, provider defaults |
+
+All jobs for one model, three attempts each:
+
+```bash
+for job in jobs/*.yaml; do
+  inspect eval inspect_task.py@cari_job -T job=$job --model openrouter/z-ai/glm-5.3-flash --epochs 3
+done
+```
+
+## Ask the selection prompts, or your own
 
 ```bash
 inspect eval inspect_task.py@cari_selection --model openrouter/openai/gpt-6-sol --epochs 5
@@ -81,17 +87,26 @@ inspect eval inspect_task.py@cari_selection -T prompts=my_prompts.json --model o
   "prompt": "I need a background job queue for my Java web app: send emails, resize images, retry jobs that fail. What do you set up?"}]
 ```
 
-The score is the share of answers that set up Valkey. The store each answer set up, and why, is in the log.
+The score is the share of answers that set up Valkey; the store each answer set up, and why, is in the log. Answers whose code and stated choice disagree are marked `conflict` for a second look.
 
 ## How close this is to the published runs
 
-The published runs used Docka's own harness, which is not public. This runner keeps what matters for the verdict: the same prompts, images, graders, system prompt, tools, tool descriptions and output limits. It differs in three places: no browser fallback for pages that render only in JavaScript, no per-host rate limit, and the runaway guard counts messages rather than tool calls (3M tokens, 60 minutes and about 500 tool calls per attempt).
+The published runs used Docka's own harness, which is not public.
 
-Checked on 2026-10-05: nine grader proofs across six job files gave the expected verdicts under this runner, and DeepSeek V4.1 Flash on the cache job gave 3 of 3, as in the published run, with longer paths (a median of 15 tool calls against 8). Expect the same verdicts, not identical numbers.
+**The same:** the prompts, the images (same server versions and Python packages), the system prompt, the two tools with the same descriptions and output limits (`exec`: 4,000 characters of stdout, 1,500 of stderr; `fetch_doc`: 6,000 characters of page text, extracted the same way), 64,000 output tokens per turn, one nudge after a turn that comes back empty or cut off, and the runaway guard's limits.
+
+**Different:**
+
+1. **The graders are v2.** They close four gaps an outside review found in v1: the cache TTL is checked on the keys that hold the product, search wants the full top 5 in order and all 1,000 articles searchable and fails a `search.py` that reads the data back, and the old server's expiry deadlines must not move. Re-checked from what the published runs recorded, every published pass also meets the cache and search-order rules; the other checks need a running container and cannot be re-run on old attempts. Details: `jobs/README.md` and the review note in cari-valkey-redis.
+2. **Model settings.** The published runs gave Claude adaptive thinking at effort medium and left the others at provider defaults. This runner leaves every model at Inspect's defaults; pass reasoning options yourself to match.
+3. **No browser fallback** for pages that render only in JavaScript, and **no per-host rate limit** for `fetch_doc`.
+4. **The runaway guard counts messages**, not tool calls: 3M tokens, 60 minutes, about 500 tool calls per attempt.
+
+**Checked on 2026-10-06:** 35 of 35 grader proofs on the images the published runs used, and 35 of 35 on images freshly built with `build.sh`. One live check: DeepSeek V4.1 Flash on the cache job gave 3 of 3, as in the published run (on 2026-10-05, before the nudge and the per-turn limit were added). This is not yet validated across all models and jobs: expect close numbers, not identical ones.
 
 ## Add a job or a prompt
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). A job counts once its grader passes a correct solution and fails known wrong ones, and step 3 above runs exactly that check.
+See [CONTRIBUTING.md](CONTRIBUTING.md). A job counts once its grader passes a correct solution and fails known wrong ones in `prove_all.py`.
 
 ## Licence
 

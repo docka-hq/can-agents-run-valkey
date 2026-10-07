@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Selection coding, v1: what does each answer actually SET UP?
+"""Selection coding, v2 (2026-10-06): what does each answer actually SET UP?
+
+v2 changes, after an outside review. The published counts were coded with v1 (cari-valkey-redis), and v2 codes
+every published answer the same way:
+  - tier 2 skips a managed service named in a fallback sentence ("Use Valkey. If unavailable, use ElastiCache
+    for Redis" was coded Redis by v1);
+  - an answer whose deciding evidence and stated choice name different stores is flagged as a conflict for hand
+    review, instead of being coded silently (an optional Redis next to a recommended RabbitMQ);
+  - run as a script, it codes text from files or stdin.
+
+v1 notes follow.
 
 v0 (inside kv_select.py, kept unchanged with the frozen runner) matched patterns anywhere in the text, so
 a Terraform comment like `# use "redis7" if engine = "redis"` or a fallback tip ("if your provider lacks
@@ -59,6 +69,18 @@ IMPORTS = [  # tier 2.5: what the setup code imports (redis-py alone never decid
 ]
 
 
+FALLBACK = re.compile(r"(?i)\b(if (?:it'?s |that'?s |\w+ is )?(?:unavailable|not available|not supported)|"
+                      r"if you (?:can'?t|cannot|prefer|need|want)|otherwise|alternatively|as a fallback|fall ?back|"
+                      r"or use|if your (?:provider|region|cloud|platform))\b")
+
+
+def sentence_at(text: str, start: int, end: int) -> str:
+    """The sentence (or line) around a match, so a cue in one sentence does not reach into the next."""
+    a = max(text.rfind(c, 0, start) for c in ".!?;\n") + 1
+    after = [i for i in (text.find(c, end) for c in ".!?;\n") if i != -1]
+    return text[a:min(after) if after else len(text)]
+
+
 def norm(word: str) -> str:
     w = word.lower()
     if w in ("upstash", "redis cloud") or "redis" in w:
@@ -90,6 +112,8 @@ def tier_hits(text: str):
     t2 = []
     for pat, flags in TIER2:
         for m in re.finditer(pat, text, flags or 0):
+            if FALLBACK.search(sentence_at(text, m.start(), m.end())):
+                continue  # v2: a service named only as the fallback is not the pick
             t2.append((m.start(), norm(m.group(1))))
     return sorted(t1), sorted(t2)
 
@@ -103,12 +127,34 @@ def store_of(word: str) -> str:
     return "other:" + w
 
 
+ADJECTIVE = re.compile(r"(?i)^[-\s]*(?:protocol|compatible|wire|like|style|api|clients?)\b")
+
+
+def stated_choice(text: str):
+    """The store named in the first sentence that reads as a pick, or None. Checked sentence by sentence, so a
+    fallback later in a paragraph does not hide the pick; "Redis-compatible" and "Redis-protocol" are not picks."""
+    for ln in (text or "").splitlines():
+        if not TRIGGER.search(ln):
+            continue
+        for sent in re.split(r"(?<=[.!?;])\s+", ln):
+            if FALLBACK.search(sent):
+                continue
+            for m in STORE_RE.finditer(sent):
+                if not ADJECTIVE.match(sent[m.end():]):
+                    return store_of(m.group(1))
+    return None
+
+
 def classify(text: str) -> dict:
     t1, t2 = tier_hits(text)
+    said = stated_choice(text)
     for tier, hits in (("code", t1), ("managed service named", t2)):
         prods = [p for _, p in hits if p in PRODUCTS]
         if prods:
-            return {"primary": prods[0], "basis": tier, "evidence": sorted(set(prods)), "conflict": len(set(prods)) > 1}
+            # v2: deciding evidence and the stated choice disagree -> hand review, not a silent code
+            disagree = said is not None and said != prods[0] and not (said in PRODUCTS and said in prods)
+            return {"primary": prods[0], "basis": tier, "evidence": sorted(set(prods)),
+                    "conflict": len(set(prods)) > 1 or disagree, "stated_choice": said}
     lines = code_lines(text)
     imp = []
     for ln in lines:
@@ -137,55 +183,12 @@ def classify(text: str) -> dict:
 
 
 def main() -> None:
-    cfg = json.loads((ROOT / "config/selection-1.json").read_text())
-    wd = ROOT / "runs" / cfg["wave"]
-    recs = {}
-    for line in (wd / "records.jsonl").read_text().splitlines():
-        r = json.loads(line)
-        if (r.get("text") or "").strip():
-            recs[(r["scenario"], r["model_key"], r["rep"])] = r
-    refilled = 0
-    rf = wd / "refill.jsonl"  # kv_refill.py: answers for cells that came back empty at 16k (never for an answered cell)
-    if rf.exists():
-        for line in rf.read_text().splitlines():
-            r = json.loads(line)
-            k = (r["scenario"], r["model_key"], r["rep"])
-            if k not in recs and (r.get("text") or "").strip():
-                recs[k] = r
-                refilled += 1
-    ovp = ROOT / "config" / f"{cfg['wave']}-review.json"
-    overrides = json.loads(ovp.read_text()) if ovp.exists() else {}
-    rows = []
-    for (s, m, rep), r in sorted(recs.items()):
-        c = classify(r["text"])
-        key = f"{s}|{m}|{rep}"
-        if key in overrides:
-            c.update(primary=overrides[key]["primary"], basis="hand review: " + overrides[key]["why"], reviewed=True)
-        rows.append({"scenario": s, "model_key": m, "rep": rep, **c,
-                     "mentions_valkey": bool(re.search(r"\bvalkey\b", r["text"], re.I)),
-                     "mentions_redis": bool(re.search(r"\bredis\b", r["text"], re.I)),
-                     "cites_license": bool(re.search(r"(?i)\b(licen[sc]e|licensed|licensing|BSD|SSPL|AGPL|RSAL|permissive)\b", r["text"])),
-                     "cost_usd": r.get("cost_usd")})
-    agg = wd / "aggregate"
-    agg.mkdir(exist_ok=True)
-    (agg / "classified.jsonl").write_text("".join(json.dumps(x) + "\n" for x in rows))
-    by_model, by_scen = defaultdict(Counter), defaultdict(Counter)
-    for x in rows:
-        by_model[x["model_key"]][x["primary"]] += 1
-        by_scen[x["scenario"]][x["primary"]] += 1
-    review = [x for x in rows if x["conflict"] and not x.get("reviewed")]
-    summary = {"coding": "v1 (tiered, code lines only)", "answers": len(rows), "primary": dict(Counter(x["primary"] for x in rows)),
-               "mentions_valkey": sum(x["mentions_valkey"] for x in rows),
-               "mentions_valkey_by_scenario": dict(Counter(x["scenario"] for x in rows if x["mentions_valkey"])),
-               "by_model": {k: dict(v) for k, v in by_model.items()}, "by_scenario": {k: dict(v) for k, v in by_scen.items()},
-               "basis": dict(Counter(x["basis"].split(":")[0] for x in rows)),
-               "valkey_picks_citing_license": dict(Counter(x["scenario"] for x in rows if x["primary"] == "valkey" and x["cites_license"])),
-               "hand_reviewed": sum(1 for x in rows if x.get("reviewed")), "open_conflicts": len(review), "refilled": refilled,
-               "spend_usd": round(sum(float(x.get("cost_usd") or 0) for x in rows), 3)}
-    (agg / "summary.json").write_text(json.dumps(summary, indent=1))
-    print(json.dumps(summary, indent=1))
-    for x in review:
-        print("REVIEW", f"{x['scenario']}|{x['model_key']}|{x['rep']}", x["primary"], x["basis"], x["evidence"])
+    """Code text from files given as arguments, or from stdin: python3 kv_classify.py answer.md"""
+    import sys
+    paths = sys.argv[1:]
+    texts = [(pth, pathlib.Path(pth).read_text()) for pth in paths] if paths else [("stdin", sys.stdin.read())]
+    for name, text in texts:
+        print(json.dumps({"file": name, **classify(text)}))
 
 
 if __name__ == "__main__":

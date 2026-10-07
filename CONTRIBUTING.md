@@ -15,7 +15,7 @@ Add an entry in the format of `selection/config.json`:
 - Say in `turf` what it tests.
 - A variant of an existing prompt (another language, the same need asked by a person and by an agent) is the most useful kind: it isolates one difference.
 
-Try it before sending: `inspect eval inspect_task.py@cari_selection -T prompts=my_prompts.json --model ... --epochs 5`. Answers are coded by the rules in `selection/README.md`. If a prompt needs a different rule, say which and why.
+Try it before sending: `inspect eval inspect_task.py@cari_selection -T prompts=my_prompts.json --model ... --epochs 5`. Answers are coded by the rules in `selection/README.md`; if you change the classifier, `python3 selection/test_classify.py ../cari-valkey-redis` must still pass. If a prompt needs a different rule, say which and why.
 
 ## A job
 
@@ -23,8 +23,8 @@ A job is one YAML file in `jobs/`, in the format described in `jobs/README.md`, 
 
 1. **The prompt.** If the job has a Redis twin, the two prompts differ only in the product's name, version and config path.
 2. **A container image** with the starting state: a Dockerfile and assets in `images/`, added to `images/build.sh`.
-3. **A grader** that runs inside the container after the agent stops, checks the end state, prints one JSON line `{"pass": ..., "reasons": [...], "facts": {...}}` and exits 0 on a pass. Keep its source in `jobs/graders/` and inline it in the YAML.
-4. **Proofs**: one correct solution that passes and at least one known wrong solution that fails, in `jobs/reference/`. Check both with the runner and `--model mockllm/model` (no model calls), and include the output. A grader that is not proven both ways is not used.
+3. **A grader** that runs inside the container after the agent stops, checks the end state, prints one JSON line `{"pass": ..., "reasons": [...], "facts": {...}}` and exits 0 on a pass. Keep its source in `jobs/graders/` and run `python3 jobs/build_jobs.py` to inline it.
+4. **Proofs**: one correct solution that passes and at least one known wrong solution that fails, in `jobs/reference/`. Add them to `prove_all.py`, run it (no model calls), and include the output. A grader that is not proven both ways is not used. A wrong solution that exploits a specific weakness of the grader is the most useful kind.
 
 The grader checks what the prompt asks for, nothing more, and never trusts what the agent says it did. No job may need a secret or an outside account.
 

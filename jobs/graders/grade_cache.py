@@ -4,7 +4,8 @@
 #
 # What "done" means here (from the prompt, nothing more):
 #   - reads come from the provided server and are shared across processes  -> 2 reads in 2 processes = 1 upstream GET
-#   - entries expire after 5 minutes                                       -> a key with 240 <= TTL <= 300 s
+#   - entries expire after 5 minutes                                       -> every key holding product 7 has 240 <= TTL <= 300 s
+#     (v2, 2026-10-06: v1 accepted any key with such a TTL; keys are found by content, not by name)
 #   - after update_price, any process sees the new price                   -> fresh process reads 123.45
 #   - update_price still writes the inventory service                      -> audited price is 123.45
 #   - get_product's return value unchanged                                 -> dict equal to the original record
@@ -121,18 +122,58 @@ if g7 != 1:
     reasons.append(f"two reads of product 7 in two processes made {g7} inventory calls (want exactly 1: "
                    f"the second read must come from the shared cache)")
 
-# 4. the cache lives in the provided server, with a ~5 minute expiry
-ttls = []
+# 4. the cache lives in the provided server, and the cached product itself expires in ~5 minutes
+def value_text(rd, k) -> str:
+    """The key's value as text, whatever the type, so a cached product is found by content, not by key name."""
+    import gzip
+    import zlib
+    try:
+        t = rd.type(k).decode()
+        if t == "string":
+            v = rd.get(k) or b""
+            for unpack in (zlib.decompress, gzip.decompress):
+                try:
+                    v = unpack(v)
+                    break
+                except Exception:  # noqa: BLE001
+                    pass
+        elif t == "hash":
+            v = b" ".join(a + b" " + b for a, b in rd.hgetall(k).items())
+        elif t == "ReJSON-RL":
+            v = rd.execute_command("JSON.GET", k) or b""
+        elif t == "list":
+            v = b" ".join(rd.lrange(k, 0, -1))
+        elif t == "set":
+            v = b" ".join(rd.smembers(k))
+        elif t == "zset":
+            v = b" ".join(rd.zrange(k, 0, -1))
+        else:
+            return ""
+    except Exception:  # noqa: BLE001
+        return ""
+    return v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v)
+
+
+ttls, entries = [], []
 for dbname in (r.info("keyspace") or {}):
     db = int(dbname[2:])
     rd = redis.Redis(port=6379, db=db, socket_timeout=10)
     for k in rd.scan_iter(count=500):
-        ttls.append((db, k.decode(errors="replace"), rd.ttl(k)))
+        t = rd.ttl(k)
+        name = k.decode(errors="replace")
+        ttls.append((db, name, t))
+        if E7["name"] in value_text(rd, k):
+            entries.append((db, name, t))
 facts["keys"] = ttls[:20]
+facts["product7_entries"] = entries[:10]
 if not ttls:
     reasons.append("no keys in the provided server after reads: the cache is not in it")
-elif not any(240 <= t <= 300 for _, _, t in ttls):
-    reasons.append(f"no cache entry expiring in about 5 minutes (TTLs seen: {sorted({t for _, _, t in ttls})[:10]})")
+elif not entries:
+    reasons.append("no key in the provided server holds product 7 after it was read: the cache is not in it")
+else:
+    off = [(db, k, t) for db, k, t in entries if not 240 <= t <= 300]
+    if off:
+        reasons.append(f"cached product 7 does not expire in about 5 minutes ({', '.join(f'{k}: TTL {t}' for _, k, t in off[:3])})")
 
 # 5. a price change is visible to the next read in any process, and reaches the inventory
 _, eu = agent(UPDATE.format(pid=7, price=123.45))

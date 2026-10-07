@@ -7,6 +7,7 @@
 #   - the new server holds an exact copy: same keys in every database, same types, same values,
 #     same remaining TTL (within 60 s), stream consumer groups and their pending entries included
 #   - the new server is a standalone primary that accepts writes
+#   - (v2) the current server's expiry deadlines are unchanged, against a baseline the runner took before the agent
 #   - the current server still runs, is still Redis 7.2.16, and its data is unchanged
 import json
 import sys
@@ -61,6 +62,41 @@ want = open(CFG["old_digest_path"]).read().strip()
 facts["old_digest_ok"] = digest(od) == want
 if digest(od) != want:
     reasons.append("the current server's data was changed")
+
+# 3b. the current server's expiry deadlines are unchanged (v2, 2026-10-06). The content digest above records
+# only WHETHER a key expires, so a moved deadline slipped through v1. The runner takes this baseline before the
+# agent starts, keeps it outside the container, and writes it here only after the agent has stopped.
+import os as _os
+_BASE = "/var/tmp/.kvg-old-deadlines.json"
+if _os.path.exists(_BASE):
+    _base = json.load(open(_BASE))
+    _moved = []
+    for _db, _keys in _base.get("keys", {}).items():
+        _rd = redis.Redis(port=6379, db=int(_db), socket_timeout=10)
+        _pipe = _rd.pipeline(transaction=False)
+        _names = list(_keys)
+        for _k in _names:
+            _pipe.execute_command("EXPIRETIME", bytes.fromhex(_k))
+        for _k, _now in zip(_names, _pipe.execute()):
+            if int(_now) != int(_keys[_k]):
+                _moved.append(f"db{_db}:{bytes.fromhex(_k).decode(errors='replace')}")
+    _fields_moved = []
+    for _db, _hashes in _base.get("fields", {}).items():
+        _rd = redis.Redis(port=6379, db=int(_db), socket_timeout=10)
+        for _k, _fields in _hashes.items():
+            _fs = [bytes.fromhex(f) for f in _fields]
+            _now = _rd.execute_command("HEXPIRETIME", bytes.fromhex(_k), "FIELDS", len(_fs), *_fs)
+            for _f, _t in zip(_fields, _now):
+                if int(_t) != int(_fields[_f]):
+                    _fields_moved.append(f"db{_db}:{bytes.fromhex(_k).decode(errors='replace')}.{bytes.fromhex(_f).decode(errors='replace')}")
+    facts["old_deadlines_checked"] = {"keys": sum(len(v) for v in _base.get("keys", {}).values()),
+                                      "hash_fields": sum(len(f) for h in _base.get("fields", {}).values() for f in h.values())}
+    if _moved:
+        reasons.append(f"{len(_moved)} keys on the current server had their expiry deadline changed (e.g. {', '.join(_moved[:3])})")
+    if _fields_moved:
+        reasons.append(f"{len(_fields_moved)} hash fields on the current server had their expiry deadline changed (e.g. {', '.join(_fields_moved[:3])})")
+else:
+    facts["old_deadlines_checked"] = "no baseline: the runner did not take one, so moved deadlines are not checked"
 
 # 4. exact copy
 nd = dump_server(6380)
