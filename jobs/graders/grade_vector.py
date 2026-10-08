@@ -1,4 +1,4 @@
-# Grader: vector job, v2 (seventh revision, 2026-10-07). Runs INSIDE the task container after the agent stops, with
+# Grader: vector job, v2 (eighth revision, 2026-10-07). Runs INSIDE the task container after the agent stops, with
 # the grader's own Python. The job file prepends `CFG = {...}` (product, version, the 5 held-out queries and their
 # exact cosine top-5); the agent never sees the queries or the answers.
 #
@@ -32,7 +32,6 @@
 import base64
 import binascii
 import bz2
-import concurrent.futures
 import gzip
 import json
 import lzma
@@ -468,13 +467,11 @@ try:
     positions |= set(random.Random(20261007).sample(range(1, len(ARTICLES) + 1), 30))
     probes = [aid for aid in (f"kb-{n:04d}" for n in sorted(positions)) if aid in ARTICLES]
 
-    def probe(job):
-        j, aid = job
+    missed = []
+    for j, aid in enumerate(probes):    # one at a time: the job never asks search.py to run concurrently
         res = run_query(ARTICLES[aid], f"p{j}")
-        return aid, not (res.get("error") or res.get("exit") != 0 or not res.get("ids") or res["ids"][0] != aid)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-        missed = sorted(aid for aid, ok in pool.map(probe, enumerate(probes)) if not ok)
+        if res.get("error") or res.get("exit") != 0 or not res.get("ids") or res["ids"][0] != aid:
+            missed.append(aid)
     facts["coverage_probes"] = {"probed": len(probes), "not_first": missed}
     if missed:
         reasons.append(f"{len(missed)} of {len(probes)} articles queried with their own embedding did not come back "

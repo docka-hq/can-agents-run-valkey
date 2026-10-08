@@ -8,13 +8,15 @@
 #     before and after update_price, and so does every key holding product 12 (v2, 2026-10-06: v1 accepted any key
 #     with such a TTL; keys are found by content, not by name; 2026-10-07: also after the update, and product 12)
 #   - after update_price, any process sees the new price                   -> fresh process reads 123.45 (product 7),
-#                                                                             987.65 (product 12)
+#                                                                             987.65 (product 12), and a process that
+#                                                                             read product 3 before reads 555.55 after
 #   - update_price still writes the inventory service                      -> audited price is 123.45
 #   - get_product's return value unchanged                                 -> dict equal to the original record, for every
 #                                                                             product of the catalog read in one process
 #   - update_price's return value unchanged                                -> None, as the original returns
 import hashlib
 import json
+import select
 import subprocess
 import sys
 import time
@@ -83,6 +85,9 @@ def agent(code: str, timeout: int = 60):
 READ = "import sys, json; sys.path.insert(0, '/app'); import catalog; print('__R__' + json.dumps(catalog.get_product({pid})))"
 UPDATE = ("import sys, json; sys.path.insert(0, '/app'); import catalog; "
           "print('__R__' + json.dumps(repr(catalog.update_price({pid}, {price}))))")   # the original returns None
+LONG_READ = ("import sys, json; sys.path.insert(0, '/app'); import catalog; "
+             "print('__R__' + json.dumps(catalog.get_product({pid})), flush=True); sys.stdin.readline(); "
+             "print('__R__' + json.dumps(catalog.get_product({pid})), flush=True)")
 CATALOG_READ = ("import sys, json; sys.path.insert(0, '/app'); import catalog; ids = {ids}; "
                 "print('__R__' + json.dumps([catalog.get_product(i) for i in ids] + [catalog.get_product(i) for i in ids]))")
 
@@ -293,5 +298,43 @@ else:
         i, got = wrong[0]
         reasons.append(f"reading products {catalog_ids[0]} to {catalog_ids[-1]} in one process returned another record for "
                        f"{len({j for j, _ in wrong})} of them (product {i}: {got!r}, expected {truth[i]!r}): cache keys collide")
+
+
+# 9. a process that is already running sees a price change made by another one (v2, 2026-10-07): the job says "in
+# any process", and a cache kept inside each process (functools.lru_cache, a dict) is not cleared by another process.
+def next_result(proc, timeout=60):
+    end = time.time() + timeout
+    while time.time() < end:
+        ready, _, _ = select.select([proc.stdout], [], [], max(0.0, end - time.time()))
+        if not ready:
+            break
+        line = proc.stdout.readline()
+        if not line:
+            break
+        if line.startswith("__R__"):
+            return json.loads(line[5:])
+    return None
+
+
+before3 = audit(3)
+reader = subprocess.Popen(["python3", "-c", LONG_READ.format(pid=3)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True, cwd="/app")
+try:
+    first3 = next_result(reader)
+    ru3, eu3 = agent(UPDATE.format(pid=3, price=555.55))
+    reader.stdin.write("go\n")
+    reader.stdin.flush()
+    second3 = next_result(reader)
+finally:
+    reader.kill()
+want3 = dict(before3, price=555.55)
+facts["running_process"] = {"first": first3, "after_update": second3, "update_err": eu3}
+if first3 != before3:
+    reasons.append(f"a running process read product 3 as {first3!r}, expected {before3!r}")
+elif eu3:
+    reasons.append(f"update_price(3, 555.55) failed: {eu3}")
+elif second3 != want3:
+    reasons.append(f"a process that had read product 3 before another process changed its price still read {second3!r} "
+                   f"afterwards, expected {want3!r}: the new price must reach every process, including running ones")
 
 finish()
