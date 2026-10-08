@@ -1,4 +1,4 @@
-# Grader: vector job, v2 (fifth revision, 2026-10-07). Runs INSIDE the task container after the agent stops, with
+# Grader: vector job, v2 (sixth revision, 2026-10-07). Runs INSIDE the task container after the agent stops, with
 # the grader's own Python. The job file prepends `CFG = {...}` (product, version, the 5 held-out queries and their
 # exact cosine top-5); the agent never sees the queries or the answers.
 #
@@ -7,11 +7,13 @@
 # runs INSIDE the server; and the articles and everything search.py needs are left in the server.
 #   - loaded: every one of the 1,000 articles in the article file is stored in the server WITH ITS OWN EMBEDDING: a
 #     record that holds the article's id and its embedding (FLOAT32, FLOAT64, FLOAT16, BFLOAT16, INT8 or UINT8 bytes,
-#     or a JSON array; plain, compressed or base64), or a vector-set element whose vector is the article's or that is
-#     named by its id. A record is a hash, JSON document or string holding one article's embedding, whatever other ids
+#     a JSON array, a list of numbers, or one hash field per coordinate; plain, compressed or base64), in any database,
+#     or a vector-set element whose vector is the article's or that is named by its id. A record is a hash, JSON document or string holding one article's embedding, whatever other ids
 #     it names; a hash holding the embeddings of several articles is shared, and read entry by entry. An id stored
 #     without its embedding does not count, nor does an id not in the file. Two indexes of 500 pass.
-#   - correct: exactly 5 ids, the true top 5 in order, for every query.
+#   - correct: exactly 5 ids, the true top 5 in order, for every query; and every article can be found: eleven
+#     articles spread over the set (the first, the last, every hundredth), queried with their own embedding, come
+#     back first (an index whose prefix leaves some articles out fails here).
 #   - inside the server, with the article file moved away, measured on the same run that is scored:
 #       1. the server's own command counters show a search command (FT.SEARCH, FT.AGGREGATE, FT.HYBRID or VSIM) or a
 #          server-side script (EVAL, FCALL: similarity computed in Lua also runs inside the server) for every query;
@@ -168,11 +170,15 @@ def vemb(r, k, m) -> list:
 
 
 def keys(r):
-    for k in list(r.scan_iter(count=1000)):
-        try:
-            yield k, r.type(k)
-        except Exception:  # noqa: BLE001
-            continue
+    """Every key in every database: (client for its database, key, type, label)."""
+    for dbname in (r.info("keyspace") or {}):
+        db = int(dbname[2:])
+        rd = r if db == 0 else redis.Redis(port=6379, db=db, socket_timeout=10)
+        for k in list(rd.scan_iter(count=1000)):
+            try:
+                yield rd, k, rd.type(k), ("" if db == 0 else f"db{db}:") + k.decode(errors="replace")
+            except Exception:  # noqa: BLE001
+                continue
 
 
 def other_blobs(r, k, t) -> list:
@@ -187,12 +193,40 @@ def other_blobs(r, k, t) -> list:
     return [r.execute_command("JSON.GET", k) or b""]  # JSON documents, under whatever type name the module uses
 
 
+def numbers(values) -> list:
+    """The values as numbers, or None if any is not one."""
+    try:
+        return [float(v) for v in values]
+    except (TypeError, ValueError):
+        return None
+
+
+def coordinate_fields(h: dict) -> list:
+    """An embedding stored one coordinate per hash field: fields named <prefix><index> (e0 to e63, or 1 to 64)."""
+    groups = {}
+    for f, v in h.items():
+        m = re.fullmatch(rb"(.*?)(\d+)", f)
+        x = numbers([v]) if m else None
+        if x:
+            groups.setdefault(m.group(1), {})[int(m.group(2))] = x[0]
+    return [[c[i] for i in range(first, first + DIM)] for c in groups.values() for first in (0, 1)
+            if all(i in c for i in range(first, first + DIM))]
+
+
 def hash_view(r, k):
     """A hash's ids, vectors, and whether it is shared: it names more than RECORD_MAX_IDS articles, or holds the
     embeddings of several (a shard of articles); otherwise it is one article's record, whatever other ids it names."""
     h = r.hgetall(k)
-    ids, vecs = ids_in(k, *h.keys(), *h.values()), vectors_in(*h.values())
+    ids, vecs = ids_in(k, *h.keys(), *h.values()), vectors_in(*h.values()) + coordinate_fields(h)
     return h, ids, vecs, len(ids) > RECORD_MAX_IDS or len(matched(ids, vecs)) > 1
+
+
+def other_view(k, t, blobs):
+    """Ids and vectors of a key that is not a hash or a vector set; a list of numbers is one embedding."""
+    vecs = vectors_in(*blobs)
+    if t == b"list" and len(blobs) == DIM and numbers(blobs):
+        vecs.append(numbers(blobs))
+    return ids_in(k, *blobs), vecs
 
 
 def element_view(r, k, m):
@@ -208,12 +242,12 @@ def element_view(r, k, m):
 
 
 def stored_articles(r):
-    """(articles stored with their own embedding, every article id seen anywhere)."""
+    """(articles stored with their own embedding, every article id seen anywhere), over every database."""
     stored, seen = set(), set()
-    for k, t in keys(r):
+    for rd, k, t, _ in keys(r):
         try:
             if t == b"hash":
-                h, ids, vecs, shared = hash_view(r, k)
+                h, ids, vecs, shared = hash_view(rd, k)
                 seen |= ids
                 if shared:
                     for f, v in h.items():
@@ -221,15 +255,15 @@ def stored_articles(r):
                 else:
                     stored |= matched(ids, vecs)
             elif t == b"vectorset":
-                for m in r.execute_command("VRANDMEMBER", k, int(r.execute_command("VCARD", k))) or []:
-                    ids, _, own = element_view(r, k, m)
+                for m in rd.execute_command("VRANDMEMBER", k, int(rd.execute_command("VCARD", k))) or []:
+                    ids, _, own = element_view(rd, k, m)
                     seen |= ids
                     stored |= own
             else:
-                blobs = other_blobs(r, k, t)
-                ids = ids_in(k, *blobs)
+                blobs = other_blobs(rd, k, t)
+                ids, vecs = other_view(k, t, blobs)
                 seen |= ids
-                found = matched(ids, vectors_in(*blobs))
+                found = matched(ids, vecs)
                 if len(found) == 1:      # one article's record; one document holding several is not read
                     stored |= found
                 if t in (b"list", b"set", b"zset"):   # a list or set of records, read member by member
@@ -241,10 +275,10 @@ def stored_articles(r):
 
 
 def remove_article(r, aid: str) -> list:
-    """Remove one article from the server, as deleting it would: the record that holds its embedding, whatever other
-    ids that record names; its entries in a hash shared by several articles and in lists or sets (of records, or of
-    keys and ids that an index of the solution's own may walk); its vector-set element; and records that hold its id
-    and no other article, or are named by it. Returns what was removed."""
+    """Remove one article from the server, as deleting it would, in every database: the record that holds its
+    embedding, whatever other ids that record names; its entries in a hash shared by several articles and in lists or
+    sets (of records, or of keys and ids that an index of the solution's own may walk); its vector-set element; and
+    records that hold its id and no other article, or are named by it. Returns what was removed."""
     done = []
 
     def drop(what, label):
@@ -254,36 +288,35 @@ def remove_article(r, aid: str) -> list:
         except Exception:  # noqa: BLE001
             pass
 
-    for k, t in keys(r):
-        name = k.decode(errors="replace")
+    for rd, k, t, name in keys(r):
         try:
             if t == b"hash":
-                h, ids, vecs, shared = hash_view(r, k)
+                h, ids, vecs, shared = hash_view(rd, k)
                 if not shared and (holds_embedding_of(vecs, aid) or
                                    (not matched(ids, vecs) and (ids == {aid} or aid in ids_in(k)))):
-                    drop(lambda: r.delete(k), name)
+                    drop(lambda: rd.delete(k), name)
                 elif shared or (aid in ids and not matched(ids, vecs)):
                     # a hash shared by several articles, or a map of ids holding no embedding: only this article's
                     # entries (another article's record that merely names this one is left alone)
                     for f, v in h.items():
                         fv = vectors_in(v)
                         if holds_embedding_of(fv, aid) or (not matched(ids_in(k, f, v), fv) and ids_in(f, v) == {aid}):
-                            drop(lambda f=f: r.hdel(k, f), f"{name}[{f.decode(errors='replace')}]")
+                            drop(lambda f=f: rd.hdel(k, f), f"{name}[{f.decode(errors='replace')}]")
             elif t == b"vectorset":
-                for m in r.execute_command("VRANDMEMBER", k, int(r.execute_command("VCARD", k))) or []:
-                    _, vecs, own = element_view(r, k, m)
+                for m in rd.execute_command("VRANDMEMBER", k, int(rd.execute_command("VCARD", k))) or []:
+                    _, vecs, own = element_view(rd, k, m)
                     if own == {aid} or holds_embedding_of(vecs, aid):
-                        drop(lambda m=m: r.execute_command("VREM", k, m), f"{name}[{m.decode(errors='replace')}]")
+                        drop(lambda m=m: rd.execute_command("VREM", k, m), f"{name}[{m.decode(errors='replace')}]")
             else:
-                blobs = other_blobs(r, k, t)
-                ids, vecs = ids_in(k, *blobs), vectors_in(*blobs)
+                blobs = other_blobs(rd, k, t)
+                ids, vecs = other_view(k, t, blobs)
                 found = matched(ids, vecs)
                 single = len(ids) <= RECORD_MAX_IDS and len(found) <= 1
                 if single and (holds_embedding_of(vecs, aid) or (not found and (ids == {aid} or aid in ids_in(k)))):
-                    drop(lambda: r.delete(k), name)
+                    drop(lambda: rd.delete(k), name)
                 elif t in (b"list", b"set", b"zset"):   # a list or set of articles or of their keys: its members
-                    rem = {b"list": lambda x: r.lrem(k, 0, x), b"set": lambda x: r.srem(k, x),
-                           b"zset": lambda x: r.zrem(k, x)}[t]
+                    rem = {b"list": lambda x: rd.lrem(k, 0, x), b"set": lambda x: rd.srem(k, x),
+                           b"zset": lambda x: rd.zrem(k, x)}[t]
                     for mem in blobs:
                         if ids_in(mem) == {aid} or holds_embedding_of(vectors_in(mem), aid):
                             drop(lambda mem=mem: rem(mem), f"{name}[{mem.decode(errors='replace')[:40]}]")
@@ -366,6 +399,18 @@ try:
             res.update(top1_ok=bool(res["ids"]) and res["ids"][0] == truth[0],
                        overlap=len(set(res["ids"]) & set(truth)), exact=res["ids"] == truth)
         results.append(res)
+    # every article is searchable, not only stored: probe articles spread over the whole set (the first, the last, every
+    # hundredth), each queried with its own embedding, must come back first (no two articles are closer than 0.78)
+    probes = [aid for aid in ["kb-0001"] + [f"kb-{n:04d}" for n in range(100, 1001, 100)] if aid in ARTICLES]
+    missed = []
+    for j, aid in enumerate(probes):
+        res = run_query(ARTICLES[aid], f"p{j}")
+        if res.get("error") or res.get("exit") != 0 or not res.get("ids") or res["ids"][0] != aid:
+            missed.append(aid)
+    facts["coverage_probes"] = {"probed": probes, "not_first": missed}
+    if missed:
+        reasons.append(f"{len(missed)} of {len(probes)} articles queried with their own embedding did not come back "
+                       f"first ({', '.join(missed[:3])}): stored, but not all of them can be found by the search")
     # the removal check
     target = CFG["top5"][0][0]
     expected_after = top5_without(CFG["queries"][0], target)

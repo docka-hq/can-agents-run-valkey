@@ -40,7 +40,8 @@ success:
     #   - entries expire after 5 minutes                                       -> every key holding product 7 has 240 <= TTL <= 300 s,
     #     before and after update_price, and so does every key holding product 12 (v2, 2026-10-06: v1 accepted any key
     #     with such a TTL; keys are found by content, not by name; 2026-10-07: also after the update, and product 12)
-    #   - after update_price, any process sees the new price                   -> fresh process reads 123.45
+    #   - after update_price, any process sees the new price                   -> fresh process reads 123.45 (product 7),
+    #                                                                             987.65 (product 12)
     #   - update_price still writes the inventory service                      -> audited price is 123.45
     #   - get_product's return value unchanged                                 -> dict equal to the original record
     import hashlib
@@ -285,6 +286,16 @@ success:
         reasons.append("no key in the provided server holds product 12 after it was read")
     if off12:
         reasons.append(f"cached product 12 does not expire in about 5 minutes ({', '.join(f'{k}: TTL {t}' for _, k, t in off12[:3])})")
+
+    # 7. a price change of the second product is visible too (v2, 2026-10-07: only product 7 was updated)
+    _, eu12 = agent(UPDATE.format(pid=12, price=987.65))
+    p12, e12 = agent(READ.format(pid=12))
+    want12 = dict(E12, price=987.65)
+    facts["read12_after_update"] = {"value": p12, "err": e12}
+    if eu12:
+        reasons.append(f"update_price(12, 987.65) failed: {eu12}")
+    elif p12 != want12:
+        reasons.append(f"after update_price(12, 987.65), a new process read {p12!r} ({e12 or 'no error'}), expected {want12!r}")
 
     finish()
 
