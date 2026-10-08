@@ -6,12 +6,12 @@ runs without error: a crash is reported as an error, never as an expected fail.
 
 For each job, three kinds of check:
   - the untouched environment (an agent that does nothing) must FAIL,
-  - every correct solution must PASS: the reference one, and other valid shapes the grader must not reject
-    (a cache in base64 or bzip2 or in hash fields with their own expiry, search over two indexes, SCAN to find an
-    index, articles under opaque keys with a base64 id, with a related article named in each record, JSON documents,
-    a vector set, cosine similarity computed by a Lua script over JSON strings, over hashes of 50 articles, in
-    database 1, over one hash field per coordinate, or over MessagePack records, a search.py with a fixed scratch
-    file),
+  - every correct solution must PASS: the reference one, and other valid shapes the grader must not reject (a cache
+    in base64 or bzip2 or in hash fields with their own expiry or printing diagnostics, search over two indexes, SCAN
+    to find an index, articles under opaque keys with a base64 id, with a related article named in each record, JSON
+    documents, a vector set, cosine similarity computed by a Lua script over JSON strings, over hashes of 50
+    articles, in database 1, over one hash field per coordinate, or over MessagePack records, a search.py with a
+    fixed scratch file),
   - every known-wrong solution in jobs/reference/ must FAIL, including the ones that demonstrate gaps found by
     outside reviews (cache_decoy_ttl, cache_short_key_ttl, cache_update_no_ttl, cache_hardcoded_*,
     cache_bucket_key_collision, cache_update_returns_delete, cache_local_front_stale, vector_shuffled_tail,
@@ -19,7 +19,7 @@ For each job, three kinds of check:
     vector_restrictive_prefix, vector_index_batch_off_by_one, *_moved_deadlines).
 Every file in jobs/reference/ must be listed below; the run stops if one is not.
 
-    python3 prove_all.py            # all 100 checks, 4 at a time
+    python3 prove_all.py            # all 102 checks, 4 at a time
     python3 prove_all.py cache      # only jobs whose name starts with "cache"
 
 Needs the job images (bash images/build.sh), a running Docker daemon with Compose v2, and the packages in
@@ -53,7 +53,7 @@ WRONG = {
 }
 # correct solutions, including other valid shapes the grader must not reject
 OK = {"cache": ["cache_ok.sh", "cache_base64_ok.sh", "cache_hash_field_ttl_ok.sh", "cache_both_ttls_ok.sh",
-                "cache_bz2_ok.sh"],
+                "cache_bz2_ok.sh", "cache_diagnostic_stdout_ok.sh"],
       "vector": ["vector_ok.py", "vector_two_indexes_ok.py", "vector_scan_discovery_ok.py", "vector_opaque_ok.py",
                  "vector_related_id_ok.py", "vector_json_ok.py", "vector_set_ok.py", "vector_lua_ok.py",
                  "vector_lua_shards_ok.py", "vector_lua_db1_ok.py", "vector_lua_coordinate_fields_ok.py",

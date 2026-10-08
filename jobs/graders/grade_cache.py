@@ -16,9 +16,10 @@
 #   - update_price's return value unchanged                                -> None, as the original returns
 import hashlib
 import json
-import select
+import queue
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 
@@ -302,15 +303,28 @@ else:
 
 # 9. a process that is already running sees a price change made by another one (v2, 2026-10-07): the job says "in
 # any process", and a cache kept inside each process (functools.lru_cache, a dict) is not cleared by another process.
-def next_result(proc, timeout=60):
+def lines_of(proc) -> queue.Queue:
+    """Every line the process prints, read by a thread, so that no line waits unseen in a buffer."""
+    q = queue.Queue()
+
+    def pump():
+        for line in proc.stdout:
+            q.put(line)
+        q.put(None)
+    threading.Thread(target=pump, daemon=True).start()
+    return q
+
+
+def next_result(q, timeout=60):
+    """The next result line, skipping anything else the process prints; None on timeout or exit."""
     end = time.time() + timeout
     while time.time() < end:
-        ready, _, _ = select.select([proc.stdout], [], [], max(0.0, end - time.time()))
-        if not ready:
-            break
-        line = proc.stdout.readline()
-        if not line:
-            break
+        try:
+            line = q.get(timeout=max(0.01, end - time.time()))
+        except queue.Empty:
+            return None
+        if line is None:
+            return None
         if line.startswith("__R__"):
             return json.loads(line[5:])
     return None
@@ -318,13 +332,14 @@ def next_result(proc, timeout=60):
 
 before3 = audit(3)
 reader = subprocess.Popen(["python3", "-c", LONG_READ.format(pid=3)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, text=True, cwd="/app")
+                          stderr=subprocess.DEVNULL, text=True, cwd="/app")
+reader_lines = lines_of(reader)
 try:
-    first3 = next_result(reader)
+    first3 = next_result(reader_lines)
     ru3, eu3 = agent(UPDATE.format(pid=3, price=555.55))
     reader.stdin.write("go\n")
     reader.stdin.flush()
-    second3 = next_result(reader)
+    second3 = next_result(reader_lines)
 finally:
     reader.kill()
 want3 = dict(before3, price=555.55)
