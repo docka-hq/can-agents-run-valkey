@@ -7,15 +7,16 @@ runs without error: a crash is reported as an error, never as an expected fail.
 For each job, three kinds of check:
   - the untouched environment (an agent that does nothing) must FAIL,
   - every correct solution must PASS: the reference one, and other valid shapes the grader must not reject
-    (a cache in base64 or in hash fields with their own expiry, search over two indexes, SCAN to find an index,
-    articles under opaque keys with a base64 id, with a related article named in each record, JSON documents,
-    a vector set),
-  - every known-wrong solution in jobs/reference/ must FAIL, including the ones that exploit gaps found by outside
-    reviews (cache_decoy_ttl, cache_short_key_ttl, cache_update_no_ttl, vector_shuffled_tail, vector_*client_side,
-    vector_*local_copy*, vector_fake_ids, vector_missing_article_marker, vector_extra_output, *_moved_deadlines).
+    (a cache in base64 or bzip2 or in hash fields with their own expiry, search over two indexes, SCAN to find an
+    index, articles under opaque keys with a base64 id, with a related article named in each record, JSON documents,
+    a vector set, cosine similarity computed by a Lua script over JSON strings or over hashes of 50 articles),
+  - every known-wrong solution in jobs/reference/ must FAIL, including the ones that demonstrate gaps found by
+    outside reviews (cache_decoy_ttl, cache_short_key_ttl, cache_update_no_ttl, cache_hardcoded_expiry,
+    vector_shuffled_tail, vector_*client_side, vector_*local_copy*, vector_fake_ids, vector_missing_article_marker,
+    vector_extra_output, *_moved_deadlines).
 Every file in jobs/reference/ must be listed below; the run stops if one is not.
 
-    python3 prove_all.py            # all 72 checks, 4 at a time
+    python3 prove_all.py            # all 80 checks, 4 at a time
     python3 prove_all.py cache      # only jobs whose name starts with "cache"
 
 Needs the job images (bash images/build.sh), a running Docker daemon with Compose v2, and the packages in
@@ -37,7 +38,7 @@ spec.loader.exec_module(it)
 
 WRONG = {
     "cache": ["cache_no_invalidate.sh", "cache_inprocess.sh", "cache_decoy_ttl.sh", "cache_short_key_ttl.sh",
-              "cache_update_no_ttl.sh"],
+              "cache_update_no_ttl.sh", "cache_hardcoded_expiry.sh"],
     "vector": ["vector_bruteforce.py", "vector_shuffled_tail.py", "vector_client_side.py",
                "vector_mget_client_side.py", "vector_blob_client_side.py", "vector_local_copy.py",
                "vector_opaque_local_copy.py", "vector_local_copy_guarded.py", "vector_fake_ids.py",
@@ -46,9 +47,11 @@ WRONG = {
     "migrate8": ["migrate8_no_field_ttl.py", "migrate8_replicaof.sh", "migrate8_moved_deadlines.py"],
 }
 # correct solutions, including other valid shapes the grader must not reject
-OK = {"cache": ["cache_ok.sh", "cache_base64_ok.sh", "cache_hash_field_ttl_ok.sh", "cache_both_ttls_ok.sh"],
+OK = {"cache": ["cache_ok.sh", "cache_base64_ok.sh", "cache_hash_field_ttl_ok.sh", "cache_both_ttls_ok.sh",
+                "cache_bz2_ok.sh"],
       "vector": ["vector_ok.py", "vector_two_indexes_ok.py", "vector_scan_discovery_ok.py", "vector_opaque_ok.py",
-                 "vector_related_id_ok.py", "vector_json_ok.py", "vector_set_ok.py"],
+                 "vector_related_id_ok.py", "vector_json_ok.py", "vector_set_ok.py", "vector_lua_ok.py",
+                 "vector_lua_shards_ok.py"],
       "migrate": ["migrate_ok.sh"], "migrate8": ["migrate8_ok.py"]}
 
 

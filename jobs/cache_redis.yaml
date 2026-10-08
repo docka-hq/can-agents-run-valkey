@@ -38,8 +38,8 @@ success:
     # What "done" means here (from the prompt, nothing more):
     #   - reads come from the provided server and are shared across processes  -> 2 reads in 2 processes = 1 upstream GET
     #   - entries expire after 5 minutes                                       -> every key holding product 7 has 240 <= TTL <= 300 s,
-    #     before and after update_price (v2, 2026-10-06: v1 accepted any key with such a TTL; keys are found by content,
-    #     not by name; 2026-10-07: also checked after the update)
+    #     before and after update_price, and so does every key holding product 12 (v2, 2026-10-06: v1 accepted any key
+    #     with such a TTL; keys are found by content, not by name; 2026-10-07: also after the update, and product 12)
     #   - after update_price, any process sees the new price                   -> fresh process reads 123.45
     #   - update_price still writes the inventory service                      -> audited price is 123.45
     #   - get_product's return value unchanged                                 -> dict equal to the original record
@@ -158,23 +158,25 @@ success:
 
     # 4. the cache lives in the provided server, and the cached product itself expires in ~5 minutes
     def decode_any(v) -> str:
-        """Bytes as text, unwrapping zlib, gzip and base64 (in any order, up to three layers) so a cached product is found
-        by content whatever the encoding. Supported: plain, JSON, pickle/msgpack (names stay readable), zlib, gzip,
-        base64 and their combinations."""
+        """Bytes as text, unwrapping zlib, gzip, bzip2, xz/lzma and base64 (in any order, up to three layers) so a cached
+        product is found by content whatever the encoding. Supported: plain, JSON, pickle/msgpack (names stay readable),
+        every compression in Python's standard library, base64 and their combinations."""
         import base64
         import binascii
+        import bz2
         import gzip
+        import lzma
         import zlib
         if not isinstance(v, (bytes, bytearray)):
             return str(v)
         seen = [bytes(v)]
         for _ in range(3):
             cur = seen[-1]
-            for unpack in (zlib.decompress, gzip.decompress,
+            for unpack in (zlib.decompress, gzip.decompress, bz2.decompress, lzma.decompress,
                            lambda b: base64.b64decode(b, validate=True), lambda b: base64.urlsafe_b64decode(b)):
                 try:
                     out = unpack(cur)
-                except (zlib.error, OSError, EOFError, binascii.Error, ValueError):
+                except (zlib.error, lzma.LZMAError, OSError, EOFError, binascii.Error, ValueError):
                     continue
                 if out and out != cur:
                     seen.append(out)
@@ -202,8 +204,9 @@ success:
         return ""
 
 
-    def product7_entries():
-        """Every key, in every database, and every hash field that holds product 7, with the expiry that applies to it."""
+    def product_entries(product_name: str):
+        """Every key, in every database, and every hash field that holds the product with this name, with the expiry that
+        applies to it."""
         ttls, entries = [], []
         for dbname in (r.info("keyspace") or {}):
             db = int(dbname[2:])
@@ -216,17 +219,17 @@ success:
                     # a product may sit in one field of a shared hash with its own field expiry (HEXPIRE / HSETEX),
                     # or be the whole hash; the expiry that applies is the earlier of the key's and the field's
                     for f, v in rd.hgetall(k).items():
-                        if E7["name"] in decode_any(v) or E7["name"] in decode_any(f):
+                        if product_name in decode_any(v) or product_name in decode_any(f):
                             ft = int(rd.execute_command("HTTL", k, "FIELDS", 1, f)[0])
                             # the field disappears at whichever deadline comes first, the key's or its own
                             set_ttls = [x for x in (t, ft) if x >= 0]
                             entries.append((db, f"{name} [{f.decode(errors='replace')}]", min(set_ttls) if set_ttls else -1))
-                elif E7["name"] in value_text(rd, k):
+                elif product_name in value_text(rd, k):
                     entries.append((db, name, t))
         return ttls, entries
 
 
-    ttls, entries = product7_entries()
+    ttls, entries = product_entries(E7["name"])
     facts["keys"] = ttls[:20]
     facts["product7_entries"] = entries[:10]
     if not ttls:
@@ -261,7 +264,7 @@ success:
     if g7b > 2:
         reasons.append(f"reads after the update are not served from the cache ({g7b} inventory calls for product 7 in total)")
     # whatever the update wrote to the cache must expire like any other entry (v2, 2026-10-07: was checked only before it)
-    _, entries_after = product7_entries()
+    _, entries_after = product_entries(E7["name"])
     facts["product7_entries_after_update"] = entries_after[:10]
     off = [(db, k, t) for db, k, t in entries_after if not 240 <= t <= 300]
     if off:
@@ -275,6 +278,13 @@ success:
     facts["read12"] = {"value": q1, "upstream_gets": g12}
     if q1 != E12 or q2 != E12 or g12 != 1:
         reasons.append(f"product 12: values {q1!r}/{q2!r}, {g12} inventory calls (want the original record, 1 call)")
+    _, entries12 = product_entries(E12["name"])   # v2, 2026-10-07: product 12's expiry was not checked
+    facts["product12_entries"] = entries12[:10]
+    off12 = [(db, k, t) for db, k, t in entries12 if not 240 <= t <= 300]
+    if g12 == 1 and not entries12:
+        reasons.append("no key in the provided server holds product 12 after it was read")
+    if off12:
+        reasons.append(f"cached product 12 does not expire in about 5 minutes ({', '.join(f'{k}: TTL {t}' for _, k, t in off12[:3])})")
 
     finish()
 

@@ -1,4 +1,4 @@
-# Grader: vector job, v2 (fourth revision, 2026-10-07). Runs INSIDE the task container after the agent stops, with
+# Grader: vector job, v2 (fifth revision, 2026-10-07). Runs INSIDE the task container after the agent stops, with
 # the grader's own Python. The job file prepends `CFG = {...}` (product, version, the 5 held-out queries and their
 # exact cosine top-5); the agent never sees the queries or the answers.
 #
@@ -6,19 +6,20 @@
 # query.json` prints the ids of the 5 most similar articles, one per line, most similar first; the similarity search
 # runs INSIDE the server; and the articles and everything search.py needs are left in the server.
 #   - loaded: every one of the 1,000 articles in the article file is stored in the server WITH ITS OWN EMBEDDING: a
-#     record (a hash, JSON document or string, or one entry of a hash shared by many articles) that holds the
-#     article's id and its embedding (FLOAT32, FLOAT64, FLOAT16, BFLOAT16, INT8 or UINT8 bytes, or a JSON array;
-#     plain, compressed or base64), or a vector-set element named by the id or carrying it in its attributes. An id
-#     stored without its embedding does not count, nor does an id not in the file. Two indexes of 500 pass.
+#     record that holds the article's id and its embedding (FLOAT32, FLOAT64, FLOAT16, BFLOAT16, INT8 or UINT8 bytes,
+#     or a JSON array; plain, compressed or base64), or a vector-set element whose vector is the article's or that is
+#     named by its id. A record is a hash, JSON document or string holding one article's embedding, whatever other ids
+#     it names; a hash holding the embeddings of several articles is shared, and read entry by entry. An id stored
+#     without its embedding does not count, nor does an id not in the file. Two indexes of 500 pass.
 #   - correct: exactly 5 ids, the true top 5 in order, for every query.
 #   - inside the server, with the article file moved away, measured on the same run that is scored:
-#       1. the server's own command counters show a search command (FT.SEARCH, FT.AGGREGATE, FT.HYBRID or VSIM)
-#          for every query;
+#       1. the server's own command counters show a search command (FT.SEARCH, FT.AGGREGATE, FT.HYBRID or VSIM) or a
+#          server-side script (EVAL, FCALL: similarity computed in Lua also runs inside the server) for every query;
 #       2. the server sends search.py at most 100 KB per query. A heuristic: a search reply is a few KB, while
 #          computing the similarity outside the server from vectors read back needs all of them, over 256 KB;
-#       3. the article ranked first for query 1 is removed from the server: the record holding its embedding (the
-#          whole record, whatever other ids it mentions), the entry holding it in a shared hash, its vector-set
-#          element, and any record holding its id and no other. search.py must then run cleanly and print the true
+#       3. the article ranked first for query 1 is removed from the server, as deleting it would: the record holding
+#          its embedding (the whole record, whatever other ids it mentions), its entries in a shared hash and in lists
+#          or sets, its vector-set element, and any record holding its id and no other. search.py must then run cleanly and print the true
 #          top 5 of the remaining articles, computed here. An answer computed from a local copy keeps returning the
 #          removed article. If nothing in the server holds the article, the check cannot run and the job fails.
 # Not detectable here, and documented as limits in the README: a search.py that fetches a few hundred candidates
@@ -26,8 +27,10 @@
 # server only which articles still exist.
 import base64
 import binascii
+import bz2
 import gzip
 import json
+import lzma
 import math
 import os
 import re
@@ -43,10 +46,10 @@ import redis
 facts: dict = {}
 reasons: list = []
 MAX_BYTES_PER_QUERY = 100_000
-SEARCH_COMMANDS = ("ft.search", "ft.aggregate", "ft.hybrid", "ft.profile", "vsim")
+SEARCH_COMMANDS = ("ft.search", "ft.aggregate", "ft.hybrid", "ft.profile", "vsim",
+                   "eval", "evalsha", "eval_ro", "evalsha_ro", "fcall", "fcall_ro")  # Lua runs in the server too
 ID_RX = re.compile(rb"kb-\d{4}")
 SAME_VECTOR = 0.99      # cosine at or above which a stored vector is taken to be an article's embedding
-RECORD_MAX_FIELDS = 50  # a hash with more fields is a map shared by many articles, read field by field
 RECORD_MAX_IDS = 50     # a value naming more articles than this is an index or a list, not one article's record
 
 
@@ -66,16 +69,17 @@ def identity(r) -> bool:
 
 
 def layers(b) -> list:
-    """The value and whatever it unwraps to through zlib, gzip and base64 (up to three layers)."""
+    """The value and whatever it unwraps to through zlib, gzip, bzip2, xz/lzma and base64 (up to three layers)."""
     if not isinstance(b, (bytes, bytearray)):
         b = str(b).encode()
     seen = [bytes(b)]
     for _ in range(3):
         cur = seen[-1]
-        for unpack in (zlib.decompress, gzip.decompress, lambda x: base64.b64decode(x, validate=True)):
+        for unpack in (zlib.decompress, gzip.decompress, bz2.decompress, lzma.decompress,
+                       lambda x: base64.b64decode(x, validate=True)):
             try:
                 out = unpack(cur)
-            except (zlib.error, OSError, EOFError, binascii.Error, ValueError):
+            except (zlib.error, lzma.LZMAError, OSError, EOFError, binascii.Error, ValueError):
                 continue
             if out and out != cur:
                 seen.append(out)
@@ -143,80 +147,148 @@ def closest(v) -> str:
     return max(ARTICLES, key=lambda aid: cos(v, ARTICLES[aid]))
 
 
-def units(r):
-    """The server's contents in units of one article at most. Each unit is (label, ids, vectors, own, remove): the
-    article ids it mentions, the vectors it holds, the article it is when that is known from its form (a vector-set
-    element), and how to remove it. A hash of up to RECORD_MAX_FIELDS fields is one record; a bigger hash is a map
-    shared by many articles, one unit per field; a vector set is one unit per element; any other key is one unit."""
-    for k in list(r.scan_iter(count=1000)):
-        name = k.decode(errors="replace")
-        try:
-            t = r.type(k)
-            if t == b"hash":
-                h = r.hgetall(k)
-                if len(h) <= RECORD_MAX_FIELDS:
-                    yield name, ids_in(k, *h.keys(), *h.values()), vectors_in(*h.values()), None, \
-                        (lambda k=k: r.delete(k))
-                else:
-                    for f, v in h.items():
-                        yield f"{name}[{f.decode(errors='replace')}]", ids_in(k, f, v), vectors_in(v), None, \
-                            (lambda k=k, f=f: r.hdel(k, f))
-            elif t == b"vectorset":
-                for m in r.execute_command("VRANDMEMBER", k, int(r.execute_command("VCARD", k))) or []:
-                    attrs = r.execute_command("VGETATTR", k, m) or b""
-                    own = ids_in(m) or ids_in(attrs)
-                    yield f"{name}[{m.decode(errors='replace')}]", ids_in(m, attrs), [], \
-                        (next(iter(own)) if len(own) == 1 else None), \
-                        (lambda k=k, m=m: r.execute_command("VREM", k, m))
-            else:
-                if t == b"string":
-                    blobs = [r.get(k) or b""]
-                elif t == b"list":
-                    blobs = r.lrange(k, 0, -1)
-                elif t == b"set":
-                    blobs = list(r.smembers(k))
-                elif t == b"zset":
-                    blobs = r.zrange(k, 0, -1)
-                else:  # JSON documents, under whatever type name the module uses
-                    blobs = [r.execute_command("JSON.GET", k) or b""]
-                yield name, ids_in(k, *blobs), vectors_in(*blobs), None, (lambda k=k: r.delete(k))
-        except Exception:  # noqa: BLE001
-            continue
-
-
-def own_articles(ids, vecs, own) -> set:
-    """The articles a unit stores with their own embedding."""
-    if own:
-        return {own}
+def matched(ids, vecs) -> set:
+    """The articles, among the ids given, whose own embedding is among the vectors given."""
     if len(ids) > RECORD_MAX_IDS:
         return set()
     return {aid for aid in ids if any(cos(v, ARTICLES[aid]) >= SAME_VECTOR for v in vecs)}
 
 
+def holds_embedding_of(vecs, aid) -> bool:
+    """One of the vectors is this article's embedding: close to it, and closer to it than to any other article."""
+    return any(cos(v, ARTICLES[aid]) >= SAME_VECTOR and closest(v) == aid for v in vecs)
+
+
+def vemb(r, k, m) -> list:
+    try:
+        v = [float(x) for x in (r.execute_command("VEMB", k, m) or [])]
+    except Exception:  # noqa: BLE001
+        return []
+    return [v] if len(v) == DIM else []
+
+
+def keys(r):
+    for k in list(r.scan_iter(count=1000)):
+        try:
+            yield k, r.type(k)
+        except Exception:  # noqa: BLE001
+            continue
+
+
+def other_blobs(r, k, t) -> list:
+    if t == b"string":
+        return [r.get(k) or b""]
+    if t == b"list":
+        return r.lrange(k, 0, -1)
+    if t == b"set":
+        return list(r.smembers(k))
+    if t == b"zset":
+        return r.zrange(k, 0, -1)
+    return [r.execute_command("JSON.GET", k) or b""]  # JSON documents, under whatever type name the module uses
+
+
+def hash_view(r, k):
+    """A hash's ids, vectors, and whether it is shared: it names more than RECORD_MAX_IDS articles, or holds the
+    embeddings of several (a shard of articles); otherwise it is one article's record, whatever other ids it names."""
+    h = r.hgetall(k)
+    ids, vecs = ids_in(k, *h.keys(), *h.values()), vectors_in(*h.values())
+    return h, ids, vecs, len(ids) > RECORD_MAX_IDS or len(matched(ids, vecs)) > 1
+
+
+def element_view(r, k, m):
+    """A vector-set element's ids, vector, and the article it is: the one whose embedding it holds, else the one id
+    its name (or else its attributes) carries, for vectors the grader cannot read back (REDUCE, BIN)."""
+    attrs = r.execute_command("VGETATTR", k, m) or b""
+    ids, vecs = ids_in(m, attrs), vemb(r, k, m)
+    own = matched(ids, vecs)
+    if len(own) != 1:
+        named = ids_in(m) or ids_in(attrs)
+        own = named if len(named) == 1 else set()
+    return ids, vecs, own
+
+
 def stored_articles(r):
     """(articles stored with their own embedding, every article id seen anywhere)."""
     stored, seen = set(), set()
-    for _, ids, vecs, own, _ in units(r):
-        seen |= ids
-        stored |= own_articles(ids, vecs, own)
+    for k, t in keys(r):
+        try:
+            if t == b"hash":
+                h, ids, vecs, shared = hash_view(r, k)
+                seen |= ids
+                if shared:
+                    for f, v in h.items():
+                        stored |= matched(ids_in(k, f, v), vectors_in(v))
+                else:
+                    stored |= matched(ids, vecs)
+            elif t == b"vectorset":
+                for m in r.execute_command("VRANDMEMBER", k, int(r.execute_command("VCARD", k))) or []:
+                    ids, _, own = element_view(r, k, m)
+                    seen |= ids
+                    stored |= own
+            else:
+                blobs = other_blobs(r, k, t)
+                ids = ids_in(k, *blobs)
+                seen |= ids
+                found = matched(ids, vectors_in(*blobs))
+                if len(found) == 1:      # one article's record; one document holding several is not read
+                    stored |= found
+                if t in (b"list", b"set", b"zset"):   # a list or set of records, read member by member
+                    for mem in blobs:
+                        stored |= matched(ids_in(mem), vectors_in(mem))
+        except Exception:  # noqa: BLE001
+            continue
     return stored, seen
 
 
 def remove_article(r, aid: str) -> list:
-    """Remove one article from the server. Returns what was removed."""
-    done, target = [], ARTICLES[aid]
-    for label, ids, vecs, own, remove in units(r):
-        if own is not None:
-            hit = own == aid
-        else:
-            hit = ids == {aid} or (len(ids) <= RECORD_MAX_IDS and any(
-                cos(v, target) >= SAME_VECTOR and closest(v) == aid for v in vecs))
-        if hit:
-            try:
-                remove()
-                done.append(label)
-            except Exception:  # noqa: BLE001
-                pass
+    """Remove one article from the server, as deleting it would: the record that holds its embedding, whatever other
+    ids that record names; its entries in a hash shared by several articles and in lists or sets (of records, or of
+    keys and ids that an index of the solution's own may walk); its vector-set element; and records that hold its id
+    and no other article, or are named by it. Returns what was removed."""
+    done = []
+
+    def drop(what, label):
+        try:
+            what()
+            done.append(label)
+        except Exception:  # noqa: BLE001
+            pass
+
+    for k, t in keys(r):
+        name = k.decode(errors="replace")
+        try:
+            if t == b"hash":
+                h, ids, vecs, shared = hash_view(r, k)
+                if not shared and (holds_embedding_of(vecs, aid) or
+                                   (not matched(ids, vecs) and (ids == {aid} or aid in ids_in(k)))):
+                    drop(lambda: r.delete(k), name)
+                elif shared or (aid in ids and not matched(ids, vecs)):
+                    # a hash shared by several articles, or a map of ids holding no embedding: only this article's
+                    # entries (another article's record that merely names this one is left alone)
+                    for f, v in h.items():
+                        fv = vectors_in(v)
+                        if holds_embedding_of(fv, aid) or (not matched(ids_in(k, f, v), fv) and ids_in(f, v) == {aid}):
+                            drop(lambda f=f: r.hdel(k, f), f"{name}[{f.decode(errors='replace')}]")
+            elif t == b"vectorset":
+                for m in r.execute_command("VRANDMEMBER", k, int(r.execute_command("VCARD", k))) or []:
+                    _, vecs, own = element_view(r, k, m)
+                    if own == {aid} or holds_embedding_of(vecs, aid):
+                        drop(lambda m=m: r.execute_command("VREM", k, m), f"{name}[{m.decode(errors='replace')}]")
+            else:
+                blobs = other_blobs(r, k, t)
+                ids, vecs = ids_in(k, *blobs), vectors_in(*blobs)
+                found = matched(ids, vecs)
+                single = len(ids) <= RECORD_MAX_IDS and len(found) <= 1
+                if single and (holds_embedding_of(vecs, aid) or (not found and (ids == {aid} or aid in ids_in(k)))):
+                    drop(lambda: r.delete(k), name)
+                elif t in (b"list", b"set", b"zset"):   # a list or set of articles or of their keys: its members
+                    rem = {b"list": lambda x: r.lrem(k, 0, x), b"set": lambda x: r.srem(k, x),
+                           b"zset": lambda x: r.zrem(k, x)}[t]
+                    for mem in blobs:
+                        if ids_in(mem) == {aid} or holds_embedding_of(vectors_in(mem), aid):
+                            drop(lambda mem=mem: rem(mem), f"{name}[{mem.decode(errors='replace')[:40]}]")
+        except Exception:  # noqa: BLE001
+            continue
     return done
 
 
@@ -336,7 +408,8 @@ for i, res in enumerate(results):
         reasons.append(f"query {i + 1}: returned {res['ids']}, expected {CFG['top5'][i]} in this order "
                        f"(top-1 {'ok' if res['top1_ok'] else 'wrong'}, {res['overlap']}/5 overlap)")
     if res["search_calls"] < 1:
-        reasons.append(f"query {i + 1}: no search command (FT.SEARCH, FT.AGGREGATE, FT.HYBRID, VSIM) ran in the server")
+        reasons.append(f"query {i + 1}: no search command (FT.SEARCH, FT.AGGREGATE, FT.HYBRID, VSIM) or server-side "
+                       f"script (EVAL, FCALL) ran in the server")
     if res["bytes"] > MAX_BYTES_PER_QUERY:
         reasons.append(f"query {i + 1}: the server sent search.py {res['bytes'] // 1024} KB (a search reply is a few KB): "
                        f"the similarity is computed outside the server")
