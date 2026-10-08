@@ -24,7 +24,7 @@ The selection prompts in `selection/config.json` ask a model what it would use f
 | Path | Contents |
 |---|---|
 | `inspect_task.py` | The runner: `cari_job` for a job, `cari_selection` for the selection prompts. |
-| `prove_all.py` | Proves every grader with no model calls and no API key: 88 checks. |
+| `prove_all.py` | Proves every grader with no model calls and no API key: 96 checks. |
 | `jobs/*.yaml` | One file per job: prompt, container, starting state, grader. Format and grader rules in `jobs/README.md`. |
 | `jobs/graders/`, `jobs/build_jobs.py` | Grader sources, and the script that inlines them into the YAML files. |
 | `jobs/reference/` | A correct solution per job and known wrong ones. |
@@ -41,10 +41,10 @@ git clone https://github.com/docka-hq/can-agents-run-valkey && cd can-agents-run
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 bash images/build.sh        # builds the 5 images, starts each one, compares versions with the published build
-python3 prove_all.py        # 88 checks, no API key, no model calls
+python3 prove_all.py        # 96 checks, no API key, no model calls
 ```
 
-`build.sh` pins base images by digest and Python packages by version, so server versions and packages match the published build; Debian packages are not pinned, so image ids differ. `prove_all.py` must report 88 of 88 before you trust a run.
+`build.sh` pins base images by digest and Python packages by version, so server versions and packages match the published build; Debian packages are not pinned, so image ids differ. `prove_all.py` must report 96 of 96 before you trust a run.
 
 ## Run an agent
 
@@ -99,12 +99,12 @@ The published runs used Docka's own harness, which is not public.
 
 **Different:**
 
-1. **The graders are v2.** They close the gaps six rounds of outside review found: the cache's expiry is checked on each product read (whole key or hash field, plain, compressed or base64, the sooner expiry counting), before and after a price update, and a price update must reach the cache for both products; search wants exactly five ids, the true top 5 in order, all 1,000 supplied articles stored, each with its own embedding (in any database), and every article findable by its own embedding, and it checks behaviour on the runs it scores (a search command or a Lua script in the server for every query, at most 100 KB sent to `search.py` per query, and a correct answer once the top article is removed from the server); and the old server's expiry deadlines must not move. Re-checked from what the published runs recorded, every published pass also meets the cache and search-order rules; every published search pass stored each article's embedding with its id, in a format the grader reads (FLOAT32 or FLOAT64 bytes, a JSON array, a vector set), and its `search.py` asks the server for 5 results and prints one id for each. The other checks need a running container and cannot be re-run on old attempts. Details: `jobs/README.md` and the review note in cari-valkey-redis.
+1. **The graders are v2.** They close the gaps seven rounds of outside review found: the cache's expiry is checked on each product read (whole key or hash field, plain, compressed or base64, the sooner expiry counting), before and after a price update, a price update must reach the cache for both products, `update_price` must still return None, and every product of the catalog must come back as itself; search wants exactly five ids, the true top 5 in order, all 1,000 supplied articles stored, each with its own embedding (in any database), and 98 sampled articles findable by their own embedding, and it checks behaviour on the runs it scores (a search command or a Lua script in the server for every query, at most 100 KB sent to `search.py` per query, and a correct answer once the top article is removed from the server); and the old server's expiry deadlines must not move. Re-checked from what the published runs recorded, every published pass also meets the cache and search-order rules; every published search pass stored each article's embedding with its id, in a format the grader reads (FLOAT32 or FLOAT64 bytes, a JSON array, a vector set), and its `search.py` asks the server for 5 results and prints one id for each. The other checks need a running container and cannot be re-run on old attempts. Details: `jobs/README.md` and the review note in cari-valkey-redis.
 2. **Model settings.** The published runs gave Claude adaptive thinking at effort medium and left the others at provider defaults. This runner leaves every model at Inspect's defaults; pass reasoning options yourself to match.
 3. **No browser fallback** for pages that render only in JavaScript, and **no per-host rate limit** for `fetch_doc`.
 4. **The runaway guard counts messages**, not tool calls: 3M tokens, 60 minutes, about 500 tool calls per attempt.
 
-**Checked on 2026-10-07:** 88 of 88 grader proofs on the images the published runs used, every one with a valid grader verdict and a cleanly running solution; the earlier 35-check set also passed on images freshly built with `build.sh` (the images have not changed since). One live check: DeepSeek V4.1 Flash on the cache job gave 3 of 3, as in the published run (on 2026-10-05, before the nudge and the per-turn limit were added). This is not yet validated across all models and jobs: expect close numbers, not identical ones.
+**Checked on 2026-10-07:** 96 of 96 grader proofs on the images the published runs used, every one with a valid grader verdict and a cleanly running solution; the earlier 35-check set also passed on images freshly built with `build.sh` (the images have not changed since). One live check: DeepSeek V4.1 Flash on the cache job gave 3 of 3, as in the published run (on 2026-10-05, before the nudge and the per-turn limit were added). This is not yet validated across all models and jobs: expect close numbers, not identical ones.
 
 ## What the graders cannot see
 
@@ -113,6 +113,7 @@ The graders check the end state and how `search.py` behaves, not how an answer w
 - **Search: where the similarity is computed.** The three behaviour checks catch every way of computing outside the server we have tried (`prove_all.py` holds them), not every way there is. A `search.py` that takes a few hundred candidates from a server-side search and re-ranks them itself passes, and so does one that answers from a local copy and asks the server only which articles still exist.
 - **Search: the 100 KB limit is a heuristic.** It separates a search reply (2 to 5 KB here) from reading every vector back (over 256 KB). It counts everything the server sends during the query, so another process still using the server at grading time adds to it.
 - **Search: each article's id must be stored with its embedding.** The count of articles reads both from the same record: a hash, JSON document or string, one entry of a hash shared by many articles, or a vector-set element named by the id or carrying it in its attributes. An answer that stores vectors under numbers and keeps the ids elsewhere, in a separate list for example, fails the count, although its search may be correct. Every published search pass stored each article's embedding with its id.
+- **Search: whether every article can be found is sampled.** 98 articles are asked for by their own embedding: where loaders slip by one (the last of every batch of 50, 64, 100, 128, 256 or 512 and the first of the next), the first and the last, and 30 at random. An index that leaves out other articles passes.
 - **Search: several articles held in one string or JSON document are not counted.** Articles are read from records, from hashes and lists that hold several records, and from vector sets; one document holding many articles fails the count, although a Lua script could search it inside the server.
 - **Cache: the product is found by its name.** In a product split across several keys, only the key holding the name has its expiry checked. A product compressed with something outside Python's standard library (zstd, lz4, snappy, brotli) is not recognised, and fails.
 

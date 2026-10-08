@@ -10,7 +10,9 @@
 #   - after update_price, any process sees the new price                   -> fresh process reads 123.45 (product 7),
 #                                                                             987.65 (product 12)
 #   - update_price still writes the inventory service                      -> audited price is 123.45
-#   - get_product's return value unchanged                                 -> dict equal to the original record
+#   - get_product's return value unchanged                                 -> dict equal to the original record, for every
+#                                                                             product of the catalog read in one process
+#   - update_price's return value unchanged                                -> None, as the original returns
 import hashlib
 import json
 import subprocess
@@ -79,7 +81,10 @@ def agent(code: str, timeout: int = 60):
 
 
 READ = "import sys, json; sys.path.insert(0, '/app'); import catalog; print('__R__' + json.dumps(catalog.get_product({pid})))"
-UPDATE = "import sys, json; sys.path.insert(0, '/app'); import catalog; catalog.update_price({pid}, {price}); print('__R__true')"
+UPDATE = ("import sys, json; sys.path.insert(0, '/app'); import catalog; "
+          "print('__R__' + json.dumps(repr(catalog.update_price({pid}, {price}))))")   # the original returns None
+CATALOG_READ = ("import sys, json; sys.path.insert(0, '/app'); import catalog; ids = {ids}; "
+                "print('__R__' + json.dumps([catalog.get_product(i) for i in ids] + [catalog.get_product(i) for i in ids]))")
 
 # 0. the inventory service is the one we shipped (the prompt forbids modifying it)
 for path, want in CFG["upstream_sha256"].items():
@@ -210,7 +215,9 @@ else:
         reasons.append(f"cached product 7 does not expire in about 5 minutes ({', '.join(f'{k}: TTL {t}' for _, k, t in off[:3])})")
 
 # 5. a price change is visible to the next read in any process, and reaches the inventory
-_, eu = agent(UPDATE.format(pid=7, price=123.45))
+ru, eu = agent(UPDATE.format(pid=7, price=123.45))
+if not eu and ru != "None":
+    reasons.append(f"update_price(7, 123.45) returned {ru}; the original returns None, and the job keeps return values")
 if eu:
     reasons.append(f"update_price(7, 123.45) failed: {eu}")
 try:
@@ -255,7 +262,9 @@ if off12:
     reasons.append(f"cached product 12 does not expire in about 5 minutes ({', '.join(f'{k}: TTL {t}' for _, k, t in off12[:3])})")
 
 # 7. a price change of the second product is visible too (v2, 2026-10-07: only product 7 was updated)
-_, eu12 = agent(UPDATE.format(pid=12, price=987.65))
+ru12, eu12 = agent(UPDATE.format(pid=12, price=987.65))
+if not eu12 and ru12 != "None":
+    reasons.append(f"update_price(12, 987.65) returned {ru12}; the original returns None, and the job keeps return values")
 p12, e12 = agent(READ.format(pid=12))
 want12 = dict(E12, price=987.65)
 facts["read12_after_update"] = {"value": p12, "err": e12}
@@ -263,5 +272,26 @@ if eu12:
     reasons.append(f"update_price(12, 987.65) failed: {eu12}")
 elif p12 != want12:
     reasons.append(f"after update_price(12, 987.65), a new process read {p12!r} ({e12 or 'no error'}), expected {want12!r}")
+
+# 8. every product is cached as itself (v2, 2026-10-07): one process reads the whole catalog twice, and each read must
+# return that product's own record. Keys that collide (a bucket number, or the product's name, which several products
+# share) hand one product another's record.
+try:
+    catalog_ids = sorted(int(x["id"]) for x in json.load(open("/opt/upstream/products.json")))
+    truth = {i: audit(i) for i in catalog_ids}
+except Exception as e:  # noqa: BLE001
+    reasons.append(f"the inventory catalog could not be read: {type(e).__name__}: {e}")
+    finish()
+seen_all, e_all = agent(CATALOG_READ.format(ids=catalog_ids), timeout=180)
+facts["catalog_read"] = {"products": len(catalog_ids), "err": e_all}
+if e_all:
+    reasons.append(f"reading products {catalog_ids[0]} to {catalog_ids[-1]} in one process failed: {e_all}")
+else:
+    wrong = [(i, got) for i, got in zip(catalog_ids * 2, seen_all) if got != truth[i]]
+    facts["catalog_read"]["wrong"] = sorted({i for i, _ in wrong})[:10]
+    if wrong:
+        i, got = wrong[0]
+        reasons.append(f"reading products {catalog_ids[0]} to {catalog_ids[-1]} in one process returned another record for "
+                       f"{len({j for j, _ in wrong})} of them (product {i}: {got!r}, expected {truth[i]!r}): cache keys collide")
 
 finish()

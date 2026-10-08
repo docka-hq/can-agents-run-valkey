@@ -1,4 +1,4 @@
-# Grader: vector job, v2 (sixth revision, 2026-10-07). Runs INSIDE the task container after the agent stops, with
+# Grader: vector job, v2 (seventh revision, 2026-10-07). Runs INSIDE the task container after the agent stops, with
 # the grader's own Python. The job file prepends `CFG = {...}` (product, version, the 5 held-out queries and their
 # exact cosine top-5); the agent never sees the queries or the answers.
 #
@@ -7,13 +7,15 @@
 # runs INSIDE the server; and the articles and everything search.py needs are left in the server.
 #   - loaded: every one of the 1,000 articles in the article file is stored in the server WITH ITS OWN EMBEDDING: a
 #     record that holds the article's id and its embedding (FLOAT32, FLOAT64, FLOAT16, BFLOAT16, INT8 or UINT8 bytes,
-#     a JSON array, a list of numbers, or one hash field per coordinate; plain, compressed or base64), in any database,
-#     or a vector-set element whose vector is the article's or that is named by its id. A record is a hash, JSON document or string holding one article's embedding, whatever other ids
-#     it names; a hash holding the embeddings of several articles is shared, and read entry by entry. An id stored
-#     without its embedding does not count, nor does an id not in the file. Two indexes of 500 pass.
-#   - correct: exactly 5 ids, the true top 5 in order, for every query; and every article can be found: eleven
-#     articles spread over the set (the first, the last, every hundredth), queried with their own embedding, come
-#     back first (an index whose prefix leaves some articles out fails here).
+#     a JSON array, a MessagePack record, a list of numbers, or one hash field per coordinate; plain, compressed or
+#     base64), in any database, or a vector-set element whose vector is the article's or that is named by its id. A
+#     record is a hash, JSON document, string or list holding one article's embedding, whatever other ids it names;
+#     a hash holding the embeddings of several articles is shared, and read entry by entry. An id stored without its
+#     embedding does not count, nor does an id not in the file. Two indexes of 500 pass.
+#   - correct: exactly 5 ids, the true top 5 in order, for every query; and the articles can be found: 98 articles,
+#     queried with their own embedding, come back first (the last of every batch of 50, 64, 100, 128, 256 or 512 and
+#     the first of the next, the first and last article, 30 at random). An index whose prefix or loader
+#     leaves articles out fails here when a probed one is among them; the probe is a sample, not every article.
 #   - inside the server, with the article file moved away, measured on the same run that is scored:
 #       1. the server's own command counters show a search command (FT.SEARCH, FT.AGGREGATE, FT.HYBRID or VSIM) or a
 #          server-side script (EVAL, FCALL: similarity computed in Lua also runs inside the server) for every query;
@@ -30,11 +32,13 @@
 import base64
 import binascii
 import bz2
+import concurrent.futures
 import gzip
 import json
 import lzma
 import math
 import os
+import random
 import re
 import struct
 import subprocess
@@ -124,8 +128,57 @@ def json_arrays(o) -> list:
     return []
 
 
+def msgpack_load(b: bytes):
+    """A MessagePack value (maps, arrays, strings, numbers), or ValueError: Lua scripts store records this way."""
+    def read(i):
+        c = b[i]
+        if c <= 0x7f:
+            return c, i + 1
+        if c >= 0xe0:
+            return c - 0x100, i + 1
+        if 0x80 <= c <= 0x8f or c in (0xde, 0xdf):
+            n, i = (c & 0x0f, i + 1) if c <= 0x8f else (int.from_bytes(b[i + 1:i + (3 if c == 0xde else 5)], "big"),
+                                                         i + (3 if c == 0xde else 5))
+            out = {}
+            for _ in range(n):
+                k, i = read(i)
+                v, i = read(i)
+                out[k if isinstance(k, (str, int, float)) else str(k)] = v
+            return out, i
+        if 0x90 <= c <= 0x9f or c in (0xdc, 0xdd):
+            n, i = (c & 0x0f, i + 1) if c <= 0x9f else (int.from_bytes(b[i + 1:i + (3 if c == 0xdc else 5)], "big"),
+                                                         i + (3 if c == 0xdc else 5))
+            out = []
+            for _ in range(n):
+                v, i = read(i)
+                out.append(v)
+            return out, i
+        if 0xa0 <= c <= 0xbf or c in (0xd9, 0xda, 0xdb, 0xc4, 0xc5, 0xc6):
+            width = {0xd9: 1, 0xc4: 1, 0xda: 2, 0xc5: 2, 0xdb: 4, 0xc6: 4}.get(c, 0)
+            n = c & 0x1f if not width else int.from_bytes(b[i + 1:i + 1 + width], "big")
+            start = i + 1 + width
+            raw = b[start:start + n]
+            if len(raw) != n:
+                raise ValueError("short")
+            return (raw if c in (0xc4, 0xc5, 0xc6) else raw.decode("utf-8")), start + n
+        fixed = {0xc0: (0, None), 0xc2: (0, False), 0xc3: (0, True)}
+        if c in fixed:
+            return fixed[c][1], i + 1
+        fmt = {0xca: ">f", 0xcb: ">d", 0xcc: ">B", 0xcd: ">H", 0xce: ">I", 0xcf: ">Q",
+               0xd0: ">b", 0xd1: ">h", 0xd2: ">i", 0xd3: ">q"}.get(c)
+        if fmt is None:
+            raise ValueError(f"unsupported type {c:#x}")
+        n = struct.calcsize(fmt)
+        return struct.unpack(fmt, b[i + 1:i + 1 + n])[0], i + 1 + n
+    value, end = read(0)
+    if end != len(b) or not isinstance(value, (dict, list)):
+        raise ValueError("not a whole MessagePack map or array")
+    return value
+
+
 def vectors_in(*blobs) -> list:
-    """Vectors of the articles' dimension held in the given values: raw bytes or JSON arrays."""
+    """Vectors of the articles' dimension held in the given values: raw bytes, JSON arrays, or arrays inside a
+    MessagePack value."""
     out = []
     for bl in blobs:
         for layer in layers(bl):
@@ -133,7 +186,13 @@ def vectors_in(*blobs) -> list:
             if layer[:1] in (b"[", b"{"):
                 try:
                     out += json_arrays(json.loads(layer))
+                    continue
                 except ValueError:
+                    pass
+            if layer[:1] and (0x80 <= layer[0] <= 0x9f or layer[0] in (0xdc, 0xdd, 0xde, 0xdf)):
+                try:
+                    out += json_arrays(msgpack_load(layer))
+                except (ValueError, IndexError, struct.error, UnicodeDecodeError, RecursionError):
                     pass
     return out
 
@@ -399,15 +458,24 @@ try:
             res.update(top1_ok=bool(res["ids"]) and res["ids"][0] == truth[0],
                        overlap=len(set(res["ids"]) & set(truth)), exact=res["ids"] == truth)
         results.append(res)
-    # every article is searchable, not only stored: probe articles spread over the whole set (the first, the last, every
-    # hundredth), each queried with its own embedding, must come back first (no two articles are closer than 0.78)
-    probes = [aid for aid in ["kb-0001"] + [f"kb-{n:04d}" for n in range(100, 1001, 100)] if aid in ARTICLES]
-    missed = []
-    for j, aid in enumerate(probes):
+    # every article is searchable, not only stored: probe articles, each queried with its own embedding, must come back
+    # first (no two articles are closer than 0.78). Probed: the last of every batch of 50, 64, 100, 128, 256 or 512
+    # and the first of the next, where loaders slip by one, the first and last article, and 30 more at random.
+    positions = {1, len(ARTICLES)}
+    for size in (50, 64, 100, 128, 256, 512):
+        for end in range(size, len(ARTICLES) + 1, size):
+            positions |= {end, end + 1}
+    positions |= set(random.Random(20261007).sample(range(1, len(ARTICLES) + 1), 30))
+    probes = [aid for aid in (f"kb-{n:04d}" for n in sorted(positions)) if aid in ARTICLES]
+
+    def probe(job):
+        j, aid = job
         res = run_query(ARTICLES[aid], f"p{j}")
-        if res.get("error") or res.get("exit") != 0 or not res.get("ids") or res["ids"][0] != aid:
-            missed.append(aid)
-    facts["coverage_probes"] = {"probed": probes, "not_first": missed}
+        return aid, not (res.get("error") or res.get("exit") != 0 or not res.get("ids") or res["ids"][0] != aid)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        missed = sorted(aid for aid, ok in pool.map(probe, enumerate(probes)) if not ok)
+    facts["coverage_probes"] = {"probed": len(probes), "not_first": missed}
     if missed:
         reasons.append(f"{len(missed)} of {len(probes)} articles queried with their own embedding did not come back "
                        f"first ({', '.join(missed[:3])}): stored, but not all of them can be found by the search")

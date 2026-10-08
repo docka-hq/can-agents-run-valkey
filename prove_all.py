@@ -10,14 +10,15 @@ For each job, three kinds of check:
     (a cache in base64 or bzip2 or in hash fields with their own expiry, search over two indexes, SCAN to find an
     index, articles under opaque keys with a base64 id, with a related article named in each record, JSON documents,
     a vector set, cosine similarity computed by a Lua script over JSON strings, over hashes of 50 articles, in
-    database 1, or over one hash field per coordinate),
+    database 1, over one hash field per coordinate, or over MessagePack records),
   - every known-wrong solution in jobs/reference/ must FAIL, including the ones that demonstrate gaps found by
     outside reviews (cache_decoy_ttl, cache_short_key_ttl, cache_update_no_ttl, cache_hardcoded_*,
-    vector_shuffled_tail, vector_*client_side, vector_*local_copy*, vector_fake_ids, vector_missing_article_marker,
-    vector_extra_output, vector_restrictive_prefix, *_moved_deadlines).
+    cache_bucket_key_collision, cache_update_returns_delete, vector_shuffled_tail, vector_*client_side,
+    vector_*local_copy*, vector_fake_ids, vector_missing_article_marker, vector_extra_output,
+    vector_restrictive_prefix, vector_index_batch_off_by_one, *_moved_deadlines).
 Every file in jobs/reference/ must be listed below; the run stops if one is not.
 
-    python3 prove_all.py            # all 88 checks, 4 at a time
+    python3 prove_all.py            # all 96 checks, 4 at a time
     python3 prove_all.py cache      # only jobs whose name starts with "cache"
 
 Needs the job images (bash images/build.sh), a running Docker daemon with Compose v2, and the packages in
@@ -39,11 +40,13 @@ spec.loader.exec_module(it)
 
 WRONG = {
     "cache": ["cache_no_invalidate.sh", "cache_inprocess.sh", "cache_decoy_ttl.sh", "cache_short_key_ttl.sh",
-              "cache_update_no_ttl.sh", "cache_hardcoded_expiry.sh", "cache_hardcoded_invalidation.sh"],
+              "cache_update_no_ttl.sh", "cache_hardcoded_expiry.sh", "cache_hardcoded_invalidation.sh",
+              "cache_bucket_key_collision.sh", "cache_update_returns_delete.sh"],
     "vector": ["vector_bruteforce.py", "vector_shuffled_tail.py", "vector_client_side.py",
                "vector_mget_client_side.py", "vector_blob_client_side.py", "vector_local_copy.py",
                "vector_opaque_local_copy.py", "vector_local_copy_guarded.py", "vector_fake_ids.py",
-               "vector_missing_article_marker.py", "vector_extra_output.py", "vector_restrictive_prefix.py"],
+               "vector_missing_article_marker.py", "vector_extra_output.py", "vector_restrictive_prefix.py",
+               "vector_index_batch_off_by_one.py"],
     "migrate": ["migrate_no_ttl.py", "migrate_left_replica.sh", "migrate_moved_deadlines.sh"],
     "migrate8": ["migrate8_no_field_ttl.py", "migrate8_replicaof.sh", "migrate8_moved_deadlines.py"],
 }
@@ -52,7 +55,8 @@ OK = {"cache": ["cache_ok.sh", "cache_base64_ok.sh", "cache_hash_field_ttl_ok.sh
                 "cache_bz2_ok.sh"],
       "vector": ["vector_ok.py", "vector_two_indexes_ok.py", "vector_scan_discovery_ok.py", "vector_opaque_ok.py",
                  "vector_related_id_ok.py", "vector_json_ok.py", "vector_set_ok.py", "vector_lua_ok.py",
-                 "vector_lua_shards_ok.py", "vector_lua_db1_ok.py", "vector_lua_coordinate_fields_ok.py"],
+                 "vector_lua_shards_ok.py", "vector_lua_db1_ok.py", "vector_lua_coordinate_fields_ok.py",
+                 "vector_lua_msgpack_ok.py"],
       "migrate": ["migrate_ok.sh"], "migrate8": ["migrate8_ok.py"]}
 
 
